@@ -1,6 +1,6 @@
 import os
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
 
 import pytz
 from fastapi import FastAPI, Request, HTTPException
@@ -24,10 +24,8 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# ID ของกลุ่มไลน์กิจการนักเรียน
 STUDENT_AFFAIRS_GROUP_ID = os.environ.get("STUDENT_AFFAIRS_GROUP_ID")
 
-# LIFF ID
 LIFF_ID = os.environ.get("LIFF_ID", "2010184816-R1BNqd1n")
 LIFF_URL = os.environ.get("LIFF_URL", f"https://liff.line.me/2010184816-R1BNqd1n")
 
@@ -92,6 +90,12 @@ class UpdateRoleRequest(BaseModel):
     role: str
 
 
+class UpdateUserStatusRequest(BaseModel):
+    admin_line_user_id: str
+    target_line_user_id: str
+    is_active: bool
+
+
 # =========================================================
 # PERMISSION HELPERS
 # =========================================================
@@ -101,8 +105,11 @@ def get_menus_by_role(role: str):
         return [
             {"id": "report", "label": "แจ้งพฤติกรรม", "icon": "fa-paper-plane"},
             {"id": "add", "label": "เพิ่มนักเรียน", "icon": "fa-user-plus"},
-            {"id": "manage_users", "label": "จัดการสิทธิ์", "icon": "fa-user-gear"},
-            {"id": "report_summary", "label": "รายงาน", "icon": "fa-chart-column"},
+            {"id": "daily_report", "label": "รายงานวันนี้", "icon": "fa-calendar-day"},
+            {"id": "weekly_report", "label": "รายงานสัปดาห์", "icon": "fa-calendar-week"},
+            {"id": "monthly_report", "label": "รายงานเดือน", "icon": "fa-calendar-days"},
+            {"id": "report_summary", "label": "รายการล่าสุด", "icon": "fa-list"},
+            {"id": "manage_users", "label": "สิทธิ์ผู้ใช้", "icon": "fa-user-gear"},
         ]
 
     return [
@@ -158,15 +165,106 @@ def require_admin(line_user_id: str):
 
 
 # =========================================================
+# REPORT HELPERS
+# =========================================================
+
+def get_period_range(period: str):
+    now = now_bangkok()
+
+    if period == "daily":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        title = "รายงานวันนี้"
+
+    elif period == "weekly":
+        start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        end = start + timedelta(days=7)
+        title = "รายงานสัปดาห์นี้"
+
+    elif period == "monthly":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        if start.month == 12:
+            end = start.replace(year=start.year + 1, month=1)
+        else:
+            end = start.replace(month=start.month + 1)
+
+        title = "รายงานเดือนนี้"
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid report period.")
+
+    return start, end, title
+
+
+def summarize_logs(logs: List[Dict[str, Any]]):
+    by_offense: Dict[str, Dict[str, Any]] = {}
+    by_room: Dict[str, Dict[str, Any]] = {}
+    by_activity: Dict[str, Dict[str, Any]] = {}
+    by_teacher: Dict[str, Dict[str, Any]] = {}
+
+    total_records = len(logs)
+    total_points = 0
+    total_negative = 0
+    total_positive = 0
+
+    for log in logs:
+        offense = log.get("offense_name") or "ไม่ระบุ"
+        room = log.get("room") or "ไม่ระบุ"
+        activity = log.get("activity_type") or "ไม่ระบุ"
+        teacher = log.get("teacher_id") or "ไม่ระบุ"
+
+        points = int(log.get("points_deducted") or 0)
+        total_points += points
+
+        if points < 0:
+            total_negative += points
+        elif points > 0:
+            total_positive += points
+
+        if offense not in by_offense:
+            by_offense[offense] = {"name": offense, "count": 0, "points": 0}
+        by_offense[offense]["count"] += 1
+        by_offense[offense]["points"] += points
+
+        if room not in by_room:
+            by_room[room] = {"name": room, "count": 0, "points": 0}
+        by_room[room]["count"] += 1
+        by_room[room]["points"] += points
+
+        if activity not in by_activity:
+            by_activity[activity] = {"name": activity, "count": 0, "points": 0}
+        by_activity[activity]["count"] += 1
+        by_activity[activity]["points"] += points
+
+        if teacher not in by_teacher:
+            by_teacher[teacher] = {"name": teacher, "count": 0, "points": 0}
+        by_teacher[teacher]["count"] += 1
+        by_teacher[teacher]["points"] += points
+
+    def sort_items(data):
+        return sorted(data.values(), key=lambda x: x["count"], reverse=True)
+
+    return {
+        "total_records": total_records,
+        "total_points": total_points,
+        "total_negative": total_negative,
+        "total_positive": total_positive,
+        "by_offense": sort_items(by_offense),
+        "by_room": sort_items(by_room),
+        "by_activity": sort_items(by_activity),
+        "by_teacher": sort_items(by_teacher),
+    }
+
+
+# =========================================================
 # BACKEND APIs
 # =========================================================
 
 @app.post("/api/auth/check")
 def check_user_role(req: AuthRequest):
-    """
-    ตรวจสอบสิทธิ์จาก LINE userId
-    ถ้าไม่พบใน users จะสร้างเป็น user ทั่วไปอัตโนมัติ
-    """
     try:
         db = require_supabase()
 
@@ -222,7 +320,6 @@ def check_user_role(req: AuthRequest):
 
 @app.get("/api/init")
 def get_init_data():
-    """ดึงข้อมูลเริ่มต้นเมื่อเปิด LIFF"""
     try:
         db = require_supabase()
         rules = db.table("offense_rules").select("*").order("id").execute()
@@ -238,7 +335,6 @@ def get_init_data():
 
 @app.get("/api/students/search")
 def search_students(q: str):
-    """ค้นหารายชื่อนักเรียนจากชื่อ หรือรหัส"""
     try:
         db = require_supabase()
 
@@ -261,11 +357,6 @@ def search_students(q: str):
 
 @app.post("/api/students/add")
 def add_student(student: NewStudent):
-    """
-    เพิ่มข้อมูลนักเรียนใหม่
-    รองรับ student_id ซ้ำได้
-    แต่กันซ้ำเฉพาะ student_id + name + room เหมือนกันทุกช่อง
-    """
     try:
         db = require_supabase()
 
@@ -304,9 +395,6 @@ def add_student(student: NewStudent):
 
 @app.post("/api/report-behavior")
 def report_behavior(req: ReportRequest):
-    """
-    รับข้อมูลการแจ้งพฤติกรรม บันทึก และส่งเข้า LINE กลุ่ม
-    """
     try:
         db = require_supabase()
 
@@ -385,7 +473,6 @@ def report_behavior(req: ReportRequest):
 
 @app.get("/api/admin/users")
 def list_users(admin_line_user_id: str):
-    """แสดงรายชื่อผู้ใช้ทั้งหมด เฉพาะ admin"""
     try:
         require_admin(admin_line_user_id)
 
@@ -412,7 +499,6 @@ def list_users(admin_line_user_id: str):
 
 @app.post("/api/admin/users/update-role")
 def update_user_role(req: UpdateRoleRequest):
-    """เปลี่ยนสิทธิ์ผู้ใช้ เฉพาะ admin"""
     try:
         require_admin(req.admin_line_user_id)
 
@@ -439,9 +525,30 @@ def update_user_role(req: UpdateRoleRequest):
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 
+@app.post("/api/admin/users/update-status")
+def update_user_status(req: UpdateUserStatusRequest):
+    try:
+        require_admin(req.admin_line_user_id)
+
+        db = require_supabase()
+
+        db.table("users").update(
+            {
+                "is_active": req.is_active,
+            }
+        ).eq("line_user_id", req.target_line_user_id).execute()
+
+        return {"status": "success"}
+
+    except HTTPException as e:
+        raise e
+
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
 @app.get("/api/admin/report-summary")
 def report_summary(admin_line_user_id: str):
-    """รายงานสรุปล่าสุด เฉพาะ admin"""
     try:
         require_admin(admin_line_user_id)
 
@@ -458,6 +565,47 @@ def report_summary(admin_line_user_id: str):
         return {
             "status": "success",
             "logs": logs.data or [],
+        }
+
+    except HTTPException as e:
+        raise e
+
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/report-period")
+def report_period(admin_line_user_id: str, period: str):
+    """
+    period = daily | weekly | monthly
+    """
+    try:
+        require_admin(admin_line_user_id)
+
+        start, end, title = get_period_range(period)
+
+        db = require_supabase()
+
+        logs = (
+            db.table("behavior_logs")
+            .select("*")
+            .gte("created_at", start.isoformat())
+            .lt("created_at", end.isoformat())
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        data = logs.data or []
+        summary = summarize_logs(data)
+
+        return {
+            "status": "success",
+            "period": period,
+            "title": title,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "summary": summary,
+            "logs": data[:100],
         }
 
     except HTTPException as e:
@@ -491,12 +639,27 @@ async def callback(request: Request):
 if handler:
     @handler.add(MessageEvent, message=TextMessage)
     def handle_text_message(event):
-        """
-        ใช้สำหรับอ่านค่า Group ID
-        เชิญ Bot เข้ากลุ่ม แล้วพิมพ์ข้อความในกลุ่ม จากนั้นดู Console
-        """
         if event.source.type == "group":
-            print(f"=== YOUR GROUP ID IS: {event.source.group_id} ===")
+            group_id = event.source.group_id
+            user_id = getattr(event.source, "user_id", None)
+            user_text = event.message.text.strip().lower()
+
+            print(f"=== YOUR GROUP ID IS: {group_id} ===")
+            print(f"=== USER ID IS: {user_id} ===")
+
+            if user_text == "groupid" and line_bot_api:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(
+                        text=f"Group ID คือ:\n{group_id}\n\nUser ID ของผู้ส่งคือ:\n{user_id or '-'}"
+                    ),
+                )
+
+            elif user_text == "userid" and line_bot_api:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"User ID ของคุณคือ:\n{user_id or '-'}"),
+                )
 
 
 # =========================================================
@@ -561,10 +724,8 @@ HTML_TEMPLATE = r'''
 
     <div class="px-4">
 
-        <!-- เมนูหลังตรวจสิทธิ์ -->
         <div id="role_menu_box" class="hidden gap-2 bg-white p-1 rounded-xl shadow-sm mb-4 border border-gray-200 overflow-x-auto no-scrollbar"></div>
 
-        <!-- หน้าแรก ปุ่มเดียว -->
         <div id="view_landing" class="tab-content active">
             <div class="bg-white p-6 rounded-2xl shadow-sm text-center border-t-4 border-blue-500">
                 <div class="text-5xl text-blue-600 mb-4">
@@ -589,12 +750,7 @@ HTML_TEMPLATE = r'''
             </div>
         </div>
 
-        <!-- ===================================================== -->
-        <!-- REPORT VIEW -->
-        <!-- ===================================================== -->
-
         <div id="view_report" class="tab-content">
-
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-t-4 border-blue-500">
                 <label class="font-bold text-gray-700 mb-2 block">
                     <i class="fa-solid fa-clipboard-list text-blue-500"></i> เลือกประเภทกิจกรรม
@@ -677,17 +833,10 @@ HTML_TEMPLATE = r'''
             >
                 <i class="fa-solid fa-paper-plane"></i> ส่งข้อมูลเข้ากลุ่มกิจการนักเรียน
             </button>
-
         </div>
 
-        <!-- ===================================================== -->
-        <!-- ADD STUDENT VIEW -->
-        <!-- ===================================================== -->
-
         <div id="view_add" class="tab-content">
-
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-green-500">
-
                 <h2 class="font-bold text-gray-700 mb-3">
                     <i class="fa-solid fa-user-plus text-green-500"></i> เพิ่มนักเรียนตกหล่น
                 </h2>
@@ -697,100 +846,92 @@ HTML_TEMPLATE = r'''
                 </p>
 
                 <label class="block text-sm font-bold text-gray-700 mb-1">รหัสนักเรียน</label>
-                <input
-                    type="text"
-                    id="new_id"
-                    placeholder="เช่น 22111"
-                    class="w-full p-3 border rounded-xl bg-gray-50 mb-3"
-                >
+                <input type="text" id="new_id" placeholder="เช่น 22111" class="w-full p-3 border rounded-xl bg-gray-50 mb-3">
 
                 <label class="block text-sm font-bold text-gray-700 mb-1">ชื่อ-นามสกุล</label>
-                <input
-                    type="text"
-                    id="new_name"
-                    placeholder="เช่น ด.ช. สมชาย ใจดี"
-                    class="w-full p-3 border rounded-xl bg-gray-50 mb-3"
-                >
+                <input type="text" id="new_name" placeholder="เช่น ด.ช. สมชาย ใจดี" class="w-full p-3 border rounded-xl bg-gray-50 mb-3">
 
                 <label class="block text-sm font-bold text-gray-700 mb-1">ชั้นเรียน</label>
-                <input
-                    type="text"
-                    id="new_room"
-                    placeholder="เช่น ม.1/1"
-                    class="w-full p-3 border rounded-xl bg-gray-50 mb-4"
-                >
+                <input type="text" id="new_room" placeholder="เช่น ม.1/1" class="w-full p-3 border rounded-xl bg-gray-50 mb-4">
 
-                <button
-                    onclick="confirmAddStudent()"
-                    class="w-full bg-green-600 text-white p-3 rounded-xl font-bold shadow-sm"
-                >
+                <button onclick="confirmAddStudent()" class="w-full bg-green-600 text-white p-3 rounded-xl font-bold shadow-sm">
                     บันทึกข้อมูลนักเรียน
                 </button>
-
             </div>
-
         </div>
 
-        <!-- ===================================================== -->
-        <!-- ADMIN USER MANAGEMENT VIEW -->
-        <!-- ===================================================== -->
-
         <div id="view_manage_users" class="tab-content">
-
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-purple-500">
-
                 <h2 class="font-bold text-gray-700 mb-3">
                     <i class="fa-solid fa-user-gear text-purple-500"></i> จัดการสิทธิ์ผู้ใช้
                 </h2>
 
                 <p class="text-xs text-gray-500 mb-4">
-                    เฉพาะแอดมินเท่านั้น สามารถเปลี่ยนสิทธิ์ผู้ใช้เป็น admin หรือ user ได้
+                    เฉพาะแอดมินเท่านั้น สามารถเปลี่ยนสิทธิ์ และเปิด/ปิดการใช้งานผู้ใช้ได้
                 </p>
 
-                <button
-                    onclick="loadUsers()"
-                    class="w-full bg-purple-600 text-white p-3 rounded-xl font-bold mb-4"
-                >
+                <button onclick="loadUsers()" class="w-full bg-purple-600 text-white p-3 rounded-xl font-bold mb-4">
                     โหลดรายชื่อผู้ใช้
                 </button>
 
                 <div id="users_list" class="space-y-2"></div>
-
             </div>
-
         </div>
 
-        <!-- ===================================================== -->
-        <!-- ADMIN REPORT SUMMARY VIEW -->
-        <!-- ===================================================== -->
+        <div id="view_daily_report" class="tab-content">
+            <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-sky-500">
+                <h2 class="font-bold text-gray-700 mb-3">
+                    <i class="fa-solid fa-calendar-day text-sky-500"></i> รายงานวันนี้
+                </h2>
+                <button onclick="loadPeriodReport('daily', 'daily_report_box')" class="w-full bg-sky-600 text-white p-3 rounded-xl font-bold mb-4">
+                    โหลดรายงานวันนี้
+                </button>
+                <div id="daily_report_box"></div>
+            </div>
+        </div>
+
+        <div id="view_weekly_report" class="tab-content">
+            <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-indigo-500">
+                <h2 class="font-bold text-gray-700 mb-3">
+                    <i class="fa-solid fa-calendar-week text-indigo-500"></i> รายงานสัปดาห์นี้
+                </h2>
+                <button onclick="loadPeriodReport('weekly', 'weekly_report_box')" class="w-full bg-indigo-600 text-white p-3 rounded-xl font-bold mb-4">
+                    โหลดรายงานสัปดาห์นี้
+                </button>
+                <div id="weekly_report_box"></div>
+            </div>
+        </div>
+
+        <div id="view_monthly_report" class="tab-content">
+            <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-teal-500">
+                <h2 class="font-bold text-gray-700 mb-3">
+                    <i class="fa-solid fa-calendar-days text-teal-500"></i> รายงานเดือนนี้
+                </h2>
+                <button onclick="loadPeriodReport('monthly', 'monthly_report_box')" class="w-full bg-teal-600 text-white p-3 rounded-xl font-bold mb-4">
+                    โหลดรายงานเดือนนี้
+                </button>
+                <div id="monthly_report_box"></div>
+            </div>
+        </div>
 
         <div id="view_report_summary" class="tab-content">
-
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-orange-500">
-
                 <h2 class="font-bold text-gray-700 mb-3">
-                    <i class="fa-solid fa-chart-column text-orange-500"></i> รายงานสรุป
+                    <i class="fa-solid fa-list text-orange-500"></i> รายการแจ้งล่าสุด
                 </h2>
 
                 <p class="text-xs text-gray-500 mb-4">
                     แสดงรายการแจ้งพฤติกรรมล่าสุด 100 รายการ
                 </p>
 
-                <button
-                    onclick="loadReportSummary()"
-                    class="w-full bg-orange-500 text-white p-3 rounded-xl font-bold mb-4"
-                >
-                    โหลดรายงานล่าสุด
+                <button onclick="loadReportSummary()" class="w-full bg-orange-500 text-white p-3 rounded-xl font-bold mb-4">
+                    โหลดรายการล่าสุด
                 </button>
 
                 <div id="summary_list" class="space-y-2"></div>
-
             </div>
-
         </div>
-
     </div>
-
 
 <script>
     const LIFF_ID = "__LIFF_ID__";
@@ -803,7 +944,6 @@ HTML_TEMPLATE = r'''
     let currentSelectedStudent = null;
     let draftList = [];
     let searchTimeout = null;
-
 
     async function main() {
         try {
@@ -827,7 +967,6 @@ HTML_TEMPLATE = r'''
             Swal.fire("Error", "ไม่สามารถเชื่อมต่อ LINE LIFF ได้", "error");
         }
     }
-
 
     async function enterSystem() {
         try {
@@ -882,7 +1021,6 @@ HTML_TEMPLATE = r'''
         }
     }
 
-
     async function loadInitData() {
         const res = await fetch("/api/init");
         const data = await res.json();
@@ -911,7 +1049,6 @@ HTML_TEMPLATE = r'''
         });
     }
 
-
     function renderMenusByRole(menus) {
         const navBox = document.getElementById("role_menu_box");
 
@@ -925,7 +1062,6 @@ HTML_TEMPLATE = r'''
             </button>
         `).join("");
     }
-
 
     function switchTab(tab) {
         const views = document.querySelectorAll(".tab-content");
@@ -952,7 +1088,6 @@ HTML_TEMPLATE = r'''
         }
     }
 
-
     function handleOffenseChange() {
         const select = document.getElementById("offense_type");
         const scoreInput = document.getElementById("deduct_score");
@@ -977,7 +1112,6 @@ HTML_TEMPLATE = r'''
             scoreInput.classList.remove("border-red-500", "bg-red-50");
         }
     }
-
 
     async function searchStudent() {
         clearTimeout(searchTimeout);
@@ -1009,9 +1143,6 @@ HTML_TEMPLATE = r'''
                     <div
                         onclick="selectStudentByIndex(${idx})"
                         class="p-3 border-b hover:bg-blue-50 cursor-pointer"
-                        data-student-id="${escapeHtml(s.student_id)}"
-                        data-name="${escapeHtml(s.name)}"
-                        data-room="${escapeHtml(s.room)}"
                     >
                         <span class="font-bold text-gray-800">${escapeHtml(s.student_id)}</span>
                         - ${escapeHtml(s.name)}
@@ -1020,7 +1151,6 @@ HTML_TEMPLATE = r'''
                 `).join("");
 
                 window.latestStudentSearchResults = data.results;
-
                 resultsBox.classList.remove("hidden");
 
             } catch (e) {
@@ -1028,7 +1158,6 @@ HTML_TEMPLATE = r'''
             }
         }, 300);
     }
-
 
     function selectStudentByIndex(index) {
         const s = window.latestStudentSearchResults[index];
@@ -1039,7 +1168,6 @@ HTML_TEMPLATE = r'''
 
         selectStudent(s.student_id, s.name, s.room);
     }
-
 
     function selectStudent(id, name, room) {
         currentSelectedStudent = {
@@ -1053,7 +1181,6 @@ HTML_TEMPLATE = r'''
         document.getElementById("selected_name").innerText = `${name} (${room})`;
         document.getElementById("selected_student_form").classList.remove("hidden");
     }
-
 
     function addToList() {
         const select = document.getElementById("offense_type");
@@ -1096,7 +1223,6 @@ HTML_TEMPLATE = r'''
         renderDraftList();
     }
 
-
     function renderDraftList() {
         document.getElementById("draft_count").innerText = draftList.length;
 
@@ -1125,22 +1251,17 @@ HTML_TEMPLATE = r'''
                     </div>
                 </div>
 
-                <button
-                    onclick="removeFromList(${index})"
-                    class="text-red-400 hover:text-red-600 bg-red-50 p-2 rounded-lg"
-                >
+                <button onclick="removeFromList(${index})" class="text-red-400 hover:text-red-600 bg-red-50 p-2 rounded-lg">
                     <i class="fa-solid fa-trash"></i>
                 </button>
             </div>
         `).join("");
     }
 
-
     function removeFromList(index) {
         draftList.splice(index, 1);
         renderDraftList();
     }
-
 
     async function submitReport() {
         const activityType = document.getElementById("activity_type").value;
@@ -1191,7 +1312,6 @@ HTML_TEMPLATE = r'''
             Swal.fire("ข้อผิดพลาด", e.message, "error");
         }
     }
-
 
     async function confirmAddStudent() {
         const student_id = document.getElementById("new_id").value.trim();
@@ -1247,7 +1367,6 @@ HTML_TEMPLATE = r'''
         }
     }
 
-
     async function loadUsers() {
         if (CURRENT_ROLE !== "admin") {
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับแอดมินเท่านั้น", "error");
@@ -1279,20 +1398,28 @@ HTML_TEMPLATE = r'''
                         ${escapeHtml(user.line_user_id)}
                     </div>
 
-                    <div class="flex items-center gap-2">
-                        <select
-                            id="role_${escapeAttr(user.line_user_id)}"
-                            class="flex-1 p-2 border rounded-lg bg-white"
-                        >
+                    <div class="text-xs mb-2 ${user.is_active ? 'text-green-600' : 'text-red-600'}">
+                        สถานะ: ${user.is_active ? 'ใช้งานได้' : 'ถูกระงับ'}
+                    </div>
+
+                    <div class="flex items-center gap-2 mb-2">
+                        <select id="role_${escapeAttr(user.line_user_id)}" class="flex-1 p-2 border rounded-lg bg-white">
                             <option value="user" ${user.role === "user" ? "selected" : ""}>user</option>
                             <option value="admin" ${user.role === "admin" ? "selected" : ""}>admin</option>
                         </select>
 
-                        <button
-                            onclick="updateRole('${escapeJs(user.line_user_id)}')"
-                            class="bg-purple-600 text-white px-3 py-2 rounded-lg text-sm"
-                        >
-                            บันทึก
+                        <button onclick="updateRole('${escapeJs(user.line_user_id)}')" class="bg-purple-600 text-white px-3 py-2 rounded-lg text-sm">
+                            บันทึกสิทธิ์
+                        </button>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button onclick="updateUserStatus('${escapeJs(user.line_user_id)}', true)" class="flex-1 bg-green-600 text-white px-3 py-2 rounded-lg text-sm">
+                            เปิดใช้
+                        </button>
+
+                        <button onclick="updateUserStatus('${escapeJs(user.line_user_id)}', false)" class="flex-1 bg-red-600 text-white px-3 py-2 rounded-lg text-sm">
+                            ระงับ
                         </button>
                     </div>
                 </div>
@@ -1302,7 +1429,6 @@ HTML_TEMPLATE = r'''
             box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
         }
     }
-
 
     async function updateRole(targetLineUserId) {
         const role = document.getElementById(`role_${targetLineUserId}`).value;
@@ -1333,6 +1459,145 @@ HTML_TEMPLATE = r'''
         }
     }
 
+    async function updateUserStatus(targetLineUserId, isActive) {
+        try {
+            const res = await fetch("/api/admin/users/update-status", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    admin_line_user_id: USER_ID,
+                    target_line_user_id: targetLineUserId,
+                    is_active: isActive
+                })
+            });
+
+            const data = await res.json();
+
+            if (data.status === "error") {
+                throw new Error(data.error);
+            }
+
+            Swal.fire("สำเร็จ", "อัปเดตสถานะผู้ใช้เรียบร้อยแล้ว", "success");
+            loadUsers();
+
+        } catch (e) {
+            Swal.fire("ข้อผิดพลาด", e.message, "error");
+        }
+    }
+
+    async function loadPeriodReport(period, boxId) {
+        if (CURRENT_ROLE !== "admin") {
+            return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับแอดมินเท่านั้น", "error");
+        }
+
+        const box = document.getElementById(boxId);
+        box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลดรายงาน...</div>`;
+
+        try {
+            const res = await fetch(`/api/admin/report-period?admin_line_user_id=${encodeURIComponent(USER_ID)}&period=${encodeURIComponent(period)}`);
+            const data = await res.json();
+
+            if (data.status === "error") {
+                throw new Error(data.error);
+            }
+
+            box.innerHTML = renderPeriodReport(data);
+
+        } catch (e) {
+            box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    function renderPeriodReport(data) {
+        const s = data.summary || {};
+
+        return `
+            <div class="space-y-3">
+                <div class="bg-gray-50 border rounded-xl p-3">
+                    <div class="font-bold text-gray-800">${escapeHtml(data.title || "-")}</div>
+                    <div class="text-xs text-gray-500 break-all">
+                        ${escapeHtml(data.start || "")} ถึง ${escapeHtml(data.end || "")}
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-2">
+                    <div class="bg-white border rounded-xl p-3 text-center">
+                        <div class="text-2xl font-bold text-blue-600">${s.total_records || 0}</div>
+                        <div class="text-xs text-gray-500">รายการทั้งหมด</div>
+                    </div>
+
+                    <div class="bg-white border rounded-xl p-3 text-center">
+                        <div class="text-2xl font-bold text-red-600">${s.total_negative || 0}</div>
+                        <div class="text-xs text-gray-500">คะแนนหักรวม</div>
+                    </div>
+
+                    <div class="bg-white border rounded-xl p-3 text-center">
+                        <div class="text-2xl font-bold text-green-600">${s.total_positive || 0}</div>
+                        <div class="text-xs text-gray-500">คะแนนบวกรวม</div>
+                    </div>
+
+                    <div class="bg-white border rounded-xl p-3 text-center">
+                        <div class="text-2xl font-bold text-gray-700">${s.total_points || 0}</div>
+                        <div class="text-xs text-gray-500">สุทธิ</div>
+                    </div>
+                </div>
+
+                ${renderSummaryGroup("แยกตามความผิด", s.by_offense)}
+                ${renderSummaryGroup("แยกตามห้อง", s.by_room)}
+                ${renderSummaryGroup("แยกตามกิจกรรม", s.by_activity)}
+
+                <div class="bg-white border rounded-xl p-3">
+                    <div class="font-bold text-gray-700 mb-2">รายการล่าสุดในช่วงนี้</div>
+                    ${(data.logs || []).length === 0 ? `
+                        <div class="text-gray-400 text-sm">ไม่มีรายการ</div>
+                    ` : (data.logs || []).map(log => `
+                        <div class="border-b py-2">
+                            <div class="font-bold text-gray-800">
+                                ${escapeHtml(log.student_name || log.student_id || "-")}
+                                <span class="text-xs text-gray-500">(${escapeHtml(log.room || "-")})</span>
+                            </div>
+                            <div class="text-sm text-red-600">
+                                ${escapeHtml(log.offense_name || "-")} (${log.points_deducted || 0})
+                            </div>
+                            <div class="text-xs text-gray-500">
+                                ${escapeHtml(log.activity_type || "-")} | ${escapeHtml(log.created_at || "")}
+                            </div>
+                        </div>
+                    `).join("")}
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSummaryGroup(title, items) {
+        if (!items || items.length === 0) {
+            return `
+                <div class="bg-white border rounded-xl p-3">
+                    <div class="font-bold text-gray-700 mb-2">${escapeHtml(title)}</div>
+                    <div class="text-gray-400 text-sm">ไม่มีข้อมูล</div>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="bg-white border rounded-xl p-3">
+                <div class="font-bold text-gray-700 mb-2">${escapeHtml(title)}</div>
+                ${items.map(item => `
+                    <div class="flex justify-between border-b py-2 text-sm">
+                        <div>
+                            <div class="font-bold text-gray-800">${escapeHtml(item.name)}</div>
+                            <div class="text-xs text-gray-500">${item.count} รายการ</div>
+                        </div>
+                        <div class="${item.points < 0 ? 'text-red-600' : 'text-green-600'} font-bold">
+                            ${item.points}
+                        </div>
+                    </div>
+                `).join("")}
+            </div>
+        `;
+    }
 
     async function loadReportSummary() {
         if (CURRENT_ROLE !== "admin") {
@@ -1382,7 +1647,6 @@ HTML_TEMPLATE = r'''
         }
     }
 
-
     function escapeHtml(value) {
         if (value === null || value === undefined) {
             return "";
@@ -1396,11 +1660,9 @@ HTML_TEMPLATE = r'''
             .replace(/'/g, "&#039;");
     }
 
-
     function escapeAttr(value) {
         return escapeHtml(value);
     }
-
 
     function escapeJs(value) {
         if (value === null || value === undefined) {
@@ -1414,7 +1676,6 @@ HTML_TEMPLATE = r'''
             .replace(/\n/g, " ")
             .replace(/\r/g, " ");
     }
-
 
     main();
 </script>
@@ -1437,4 +1698,5 @@ def health_check():
         "service": "Harnthao Rangsi Prachasan - Student Affairs",
         "liff_id": LIFF_ID,
         "liff_url": LIFF_URL,
+        "student_affairs_group_id": STUDENT_AFFAIRS_GROUP_ID,
     }
