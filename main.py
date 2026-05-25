@@ -175,8 +175,10 @@ def get_user_record(line_user_id: str):
         .limit(1)
         .execute()
     )
+
     if res.data:
         return res.data[0]
+
     return None
 
 
@@ -196,25 +198,25 @@ def get_user_role(line_user_id: str) -> str:
 
 def get_display_name(line_user_id: str) -> str:
     user = get_user_record(line_user_id)
+
     if user:
         return user.get("display_name") or "คุณครู"
+
     return "คุณครู"
 
 
 def require_admin_or_higher(line_user_id: str):
     role = get_user_role(line_user_id)
+
     if ROLE_LEVELS.get(role, 0) < ROLE_LEVELS["admin"]:
         raise HTTPException(status_code=403, detail="Admin permission required.")
 
 
 def require_super_admin(line_user_id: str):
     role = get_user_role(line_user_id)
+
     if role != "super_admin":
         raise HTTPException(status_code=403, detail="Super admin permission required.")
-
-
-def can_manage_target_role(actor_role: str, target_role: str) -> bool:
-    return ROLE_LEVELS.get(actor_role, 0) > ROLE_LEVELS.get(target_role, 0)
 
 
 # =========================================================
@@ -304,7 +306,12 @@ def summarize_logs(logs: List[Dict[str, Any]]):
             (by_teacher, teacher, teacher),
         ]:
             if key not in bucket:
-                bucket[key] = {"name": name, "count": 0, "points": 0}
+                bucket[key] = {
+                    "name": name,
+                    "count": 0,
+                    "points": 0,
+                }
+
             bucket[key]["count"] += 1
             bucket[key]["points"] += points
 
@@ -316,6 +323,7 @@ def summarize_logs(logs: List[Dict[str, Any]]):
                 "count": 0,
                 "points": 0,
             }
+
         by_student[student_key]["count"] += 1
         by_student[student_key]["points"] += points
 
@@ -350,62 +358,25 @@ def build_period_report_text(period_data: Dict[str, Any]) -> str:
     ]
 
     for item in summary.get("by_offense", [])[:10]:
-        lines.append(f"- {item['name']}: {item['count']} รายการ ({item['points']} คะแนน)")
+        lines.append(
+            f"- {item['name']}: {item['count']} รายการ ({item['points']} คะแนน)"
+        )
 
     lines.append("\n🏫 แยกตามห้อง")
+
     for item in summary.get("by_room", [])[:10]:
-        lines.append(f"- {item['name']}: {item['count']} รายการ ({item['points']} คะแนน)")
+        lines.append(
+            f"- {item['name']}: {item['count']} รายการ ({item['points']} คะแนน)"
+        )
 
     lines.append("\n👥 นักเรียนที่มีรายการมากที่สุด")
+
     for item in summary.get("by_student", [])[:10]:
         lines.append(
             f"- {item['name']} ({item['room']}): {item['count']} รายการ ({item['points']} คะแนน)"
         )
 
     return "\n".join(lines)
-
-
-def check_student_risk_and_notify(student_id: str, student_name: str, room: str):
-    if not line_bot_api or not STUDENT_AFFAIRS_GROUP_ID:
-        return
-
-    db = require_supabase()
-    settings = get_system_settings()
-    base_score = int(settings.get("base_score") or 100)
-    warning_threshold = int(settings.get("warning_threshold") or 80)
-    risk_threshold = int(settings.get("risk_threshold") or 60)
-
-    logs = (
-        db.table("behavior_logs")
-        .select("points_deducted")
-        .eq("student_id", student_id)
-        .eq("student_name", student_name)
-        .eq("room", room)
-        .execute()
-    )
-
-    total_points = sum(int(x.get("points_deducted") or 0) for x in (logs.data or []))
-    current_score = base_score + total_points
-
-    if current_score <= risk_threshold:
-        text = (
-            "🚨 แจ้งเตือนนักเรียนกลุ่มเสี่ยง\n"
-            f"นักเรียน: {student_name} ({room})\n"
-            f"รหัส: {student_id}\n"
-            f"คะแนนคงเหลือโดยประมาณ: {current_score}\n"
-            f"เกณฑ์เสี่ยง: {risk_threshold}"
-        )
-        line_bot_api.push_message(STUDENT_AFFAIRS_GROUP_ID, TextSendMessage(text=text))
-
-    elif current_score <= warning_threshold:
-        text = (
-            "⚠️ แจ้งเตือนนักเรียนเฝ้าระวัง\n"
-            f"นักเรียน: {student_name} ({room})\n"
-            f"รหัส: {student_id}\n"
-            f"คะแนนคงเหลือโดยประมาณ: {current_score}\n"
-            f"เกณฑ์เฝ้าระวัง: {warning_threshold}"
-        )
-        line_bot_api.push_message(STUDENT_AFFAIRS_GROUP_ID, TextSendMessage(text=text))
 
 
 # =========================================================
@@ -431,7 +402,10 @@ def check_user_role(req: AuthRequest):
 
             if role == "inactive" or not user.get("is_active", True):
                 return JSONResponse(
-                    {"status": "error", "error": "บัญชีนี้ถูกระงับการใช้งาน"},
+                    {
+                        "status": "error",
+                        "error": "บัญชีนี้ถูกระงับการใช้งาน",
+                    },
                     status_code=403,
                 )
 
@@ -467,13 +441,20 @@ def check_user_role(req: AuthRequest):
         }
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/init")
 def get_init_data():
     try:
         db = require_supabase()
+
         rules = (
             db.table("offense_rules")
             .select("*")
@@ -489,7 +470,13 @@ def get_init_data():
         }
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/students/search")
@@ -511,7 +498,13 @@ def search_students(q: str):
         }
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/students/add")
@@ -546,14 +539,27 @@ def add_student(student: NewStudent):
             }
         ).execute()
 
-        return {"status": "success"}
+        return {
+            "status": "success",
+        }
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/report-behavior")
 def report_behavior(req: ReportRequest):
+    """
+    บันทึกข้อมูลพฤติกรรมลงฐานข้อมูลเท่านั้น
+    ไม่ส่งข้อความ LINE อัตโนมัติ เพื่อประหยัดโควตา Messaging API
+    การส่งเข้ากลุ่ม LINE ให้ใช้ปุ่มรายงานรายวัน/สัปดาห์/เดือนแทน
+    """
     try:
         db = require_supabase()
         role = get_user_role(req.teacher_id)
@@ -562,12 +568,14 @@ def report_behavior(req: ReportRequest):
             raise HTTPException(status_code=403, detail="Permission denied.")
 
         now = now_bangkok()
-        teacher_name = get_display_name(req.teacher_id)
         settings = get_system_settings()
 
         if not req.records:
             return JSONResponse(
-                {"status": "error", "error": "ไม่มีข้อมูลนักเรียนที่ต้องการแจ้ง"},
+                {
+                    "status": "error",
+                    "error": "ไม่มีข้อมูลนักเรียนที่ต้องการบันทึก",
+                },
                 status_code=400,
             )
 
@@ -592,48 +600,23 @@ def report_behavior(req: ReportRequest):
 
         db.table("behavior_logs").insert(log_entries).execute()
 
-        status_groups = {}
-
-        for r in req.records:
-            status_groups.setdefault(r.offense_name, []).append(r)
-
-        lines = [
-            "🚨 แจ้งพฤติกรรม/การเข้าเรียน",
-            f"👤 ผู้แจ้ง: {teacher_name}",
-            f"📋 กิจกรรม: {req.activity_type}",
-            f"📘 ปีการศึกษา: {settings.get('academic_year')} / ภาคเรียนที่ {settings.get('semester')}",
-            f"📅 วันที่: {now.strftime('%d/%m/%Y')}",
-            f"⏰ เวลา: {now.strftime('%H:%M น.')}",
-            "-" * 24,
-        ]
-
-        for offense, students in status_groups.items():
-            lines.append(f"\n📌 {offense} ({len(students)} คน):")
-
-            for s in students:
-                reason_text = f" | หมายเหตุ: {s.reason}" if s.reason else ""
-                lines.append(
-                    f"- {s.student_name} ({s.room}) | {s.points_deducted} คะแนน{reason_text}"
-                )
-
-        notify_text = "\n".join(lines)
-
-        if line_bot_api and STUDENT_AFFAIRS_GROUP_ID:
-            line_bot_api.push_message(
-                STUDENT_AFFAIRS_GROUP_ID,
-                TextSendMessage(text=notify_text),
-            )
-
-        for r in req.records:
-            check_student_risk_and_notify(r.student_id, r.student_name, r.room)
-
-        return {"status": "success"}
+        return {
+            "status": "success",
+            "message": "บันทึกข้อมูลเรียบร้อยแล้ว โดยยังไม่ส่งข้อความเข้ากลุ่ม LINE",
+            "saved_count": len(log_entries),
+        }
 
     except HTTPException as e:
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/admin/users")
@@ -679,7 +662,13 @@ def list_users(admin_line_user_id: str):
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/admin/users/update-role")
@@ -692,7 +681,10 @@ def update_user_role(req: UpdateRoleRequest):
 
         if req.role not in ["super_admin", "admin", "teacher", "viewer", "inactive"]:
             return JSONResponse(
-                {"status": "error", "error": "Invalid role"},
+                {
+                    "status": "error",
+                    "error": "Invalid role",
+                },
                 status_code=400,
             )
 
@@ -701,9 +693,16 @@ def update_user_role(req: UpdateRoleRequest):
 
         if actor_role != "super_admin":
             if req.role in ["super_admin", "admin"]:
-                raise HTTPException(status_code=403, detail="Admin cannot assign admin or super_admin.")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Admin cannot assign admin or super_admin.",
+                )
+
             if target_role in ["super_admin", "admin"]:
-                raise HTTPException(status_code=403, detail="Admin cannot edit admin or super_admin.")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Admin cannot edit admin or super_admin.",
+                )
 
         db = require_supabase()
         now = now_bangkok()
@@ -730,13 +729,21 @@ def update_user_role(req: UpdateRoleRequest):
             }
         ).execute()
 
-        return {"status": "success"}
+        return {
+            "status": "success",
+        }
 
     except HTTPException as e:
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/admin/users/update-status")
@@ -751,7 +758,10 @@ def update_user_status(req: UpdateUserStatusRequest):
         target_role = target.get("role", "teacher") if target else "teacher"
 
         if actor_role != "super_admin" and target_role in ["super_admin", "admin"]:
-            raise HTTPException(status_code=403, detail="Admin cannot update this user.")
+            raise HTTPException(
+                status_code=403,
+                detail="Admin cannot update this user.",
+            )
 
         db = require_supabase()
         now = now_bangkok()
@@ -767,7 +777,8 @@ def update_user_status(req: UpdateUserStatusRequest):
             update_data["role"] = "teacher"
 
         db.table("users").update(update_data).eq(
-            "line_user_id", req.target_line_user_id
+            "line_user_id",
+            req.target_line_user_id,
         ).execute()
 
         db.table("audit_logs").insert(
@@ -783,13 +794,21 @@ def update_user_status(req: UpdateUserStatusRequest):
             }
         ).execute()
 
-        return {"status": "success"}
+        return {
+            "status": "success",
+        }
 
     except HTTPException as e:
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/admin/report-summary")
@@ -816,7 +835,13 @@ def report_summary(admin_line_user_id: str):
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/admin/report-period")
@@ -825,7 +850,10 @@ def report_period(admin_line_user_id: str, period: str):
         role = get_user_role(admin_line_user_id)
 
         if role not in ["super_admin", "admin", "viewer"]:
-            raise HTTPException(status_code=403, detail="Report permission required.")
+            raise HTTPException(
+                status_code=403,
+                detail="Report permission required.",
+            )
 
         start, end, title = get_period_range(period)
         db = require_supabase()
@@ -856,11 +884,21 @@ def report_period(admin_line_user_id: str, period: str):
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/admin/send-period-report")
 def send_period_report(req: SendPeriodReportRequest):
+    """
+    ฟังก์ชันนี้คือจุดเดียวที่ส่งรายงานเข้ากลุ่ม LINE
+    ใช้เมื่อแอดมินกดปุ่มส่งรายงานเท่านั้น
+    """
     try:
         require_admin_or_higher(req.admin_line_user_id)
 
@@ -895,14 +933,30 @@ def send_period_report(req: SendPeriodReportRequest):
                 STUDENT_AFFAIRS_GROUP_ID,
                 TextSendMessage(text=report_text),
             )
+        else:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "error": "LINE Bot หรือ STUDENT_AFFAIRS_GROUP_ID ยังไม่ได้ตั้งค่า",
+                },
+                status_code=500,
+            )
 
-        return {"status": "success"}
+        return {
+            "status": "success",
+        }
 
     except HTTPException as e:
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/super-admin/settings")
@@ -919,7 +973,13 @@ def get_settings(super_admin_line_user_id: str):
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/super-admin/settings")
@@ -970,7 +1030,13 @@ def update_system_settings(req: SystemSettingsRequest):
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 @app.post("/api/super-admin/clear-behavior-logs")
@@ -1006,28 +1072,24 @@ def clear_behavior_logs(req: ClearBehaviorLogsRequest):
 
         db.table("behavior_logs").delete().neq(
             "id",
-            "00000000-0000-0000-0000-000000000000"
+            "00000000-0000-0000-0000-000000000000",
         ).execute()
 
-        if line_bot_api and STUDENT_AFFAIRS_GROUP_ID:
-            line_bot_api.push_message(
-                STUDENT_AFFAIRS_GROUP_ID,
-                TextSendMessage(
-                    text=(
-                        "⚠️ มีการลบประวัติการแจ้งพฤติกรรมทั้งหมด\n"
-                        f"ผู้ดำเนินการ: {get_display_name(req.super_admin_line_user_id)}\n"
-                        f"เวลา: {now.strftime('%d/%m/%Y %H:%M น.')}"
-                    )
-                ),
-            )
-
-        return {"status": "success"}
+        return {
+            "status": "success",
+        }
 
     except HTTPException as e:
         raise e
 
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error": str(e),
+            },
+            status_code=500,
+        )
 
 
 # =========================================================
@@ -1202,6 +1264,10 @@ HTML_TEMPLATE = r'''
         </div>
 
         <div id="view_report" class="tab-content">
+            <div class="bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded-xl mb-4 text-sm">
+                <b>หมายเหตุ:</b> การบันทึกพฤติกรรมหน้านี้จะบันทึกลงระบบเท่านั้น และจะยังไม่ส่งข้อความเข้ากลุ่ม LINE เพื่อประหยัดโควตา Messaging API หากต้องการส่งเข้ากลุ่ม ให้ใช้เมนูรายงานของแอดมิน
+            </div>
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-t-4 border-blue-500">
                 <label class="font-bold text-gray-700 mb-2 block">
                     <i class="fa-solid fa-clipboard-list text-blue-500"></i> เลือกประเภทกิจกรรม
@@ -1267,13 +1333,13 @@ HTML_TEMPLATE = r'''
                         onclick="addToList()"
                         class="w-full bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-xl font-bold transition shadow-sm"
                     >
-                        <i class="fa-solid fa-plus"></i> เพิ่มลงรายการเตรียมส่ง
+                        <i class="fa-solid fa-plus"></i> เพิ่มลงรายการเตรียมบันทึก
                     </button>
                 </div>
             </div>
 
             <h3 class="font-bold text-gray-700 mb-2">
-                รายการที่เตรียมแจ้ง (<span id="draft_count">0</span> คน)
+                รายการที่เตรียมบันทึก (<span id="draft_count">0</span> คน)
             </h3>
 
             <div id="draft_list" class="space-y-2 mb-6"></div>
@@ -1282,7 +1348,7 @@ HTML_TEMPLATE = r'''
                 onclick="submitReport()"
                 class="w-full bg-green-500 text-white p-4 rounded-xl font-bold shadow-lg"
             >
-                <i class="fa-solid fa-paper-plane"></i> ส่งข้อมูลเข้ากลุ่มกิจการนักเรียน
+                <i class="fa-solid fa-database"></i> บันทึกข้อมูลเข้าระบบ
             </button>
         </div>
 
@@ -1426,15 +1492,15 @@ HTML_TEMPLATE = r'''
                     <input type="number" id="setting_base_score" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">เกณฑ์เฝ้าระวัง</label>
-                    <p class="text-xs text-gray-500 mb-1">เมื่อนักเรียนมีคะแนนคงเหลือต่ำกว่าหรือเท่ากับค่านี้ ระบบถือว่าเริ่มต้องเฝ้าระวัง เช่น 80</p>
+                    <p class="text-xs text-gray-500 mb-1">ใช้สำหรับดูรายงานเชิงวิเคราะห์ภายในระบบ เช่น 80</p>
                     <input type="number" id="setting_warning_threshold" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">เกณฑ์เสี่ยง</label>
-                    <p class="text-xs text-gray-500 mb-1">เมื่อนักเรียนมีคะแนนคงเหลือต่ำกว่าหรือเท่ากับค่านี้ ระบบถือว่าอยู่ในกลุ่มเสี่ยง เช่น 60</p>
+                    <p class="text-xs text-gray-500 mb-1">ใช้สำหรับดูรายงานเชิงวิเคราะห์ภายในระบบ เช่น 60</p>
                     <input type="number" id="setting_risk_threshold" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">จำนวนครั้งความผิดซ้ำ</label>
-                    <p class="text-xs text-gray-500 mb-1">หากนักเรียนทำผิดเรื่องเดิมถึงจำนวนครั้งนี้ ระบบใช้เป็นเกณฑ์ติดตามพฤติกรรมซ้ำ เช่น 3</p>
+                    <p class="text-xs text-gray-500 mb-1">ใช้เป็นเกณฑ์ติดตามพฤติกรรมซ้ำ เช่น 3</p>
                     <input type="number" id="setting_repeat_offense_threshold" class="w-full p-3 border rounded-xl bg-white mb-4">
                 </div>
 
@@ -1808,7 +1874,8 @@ HTML_TEMPLATE = r'''
         }
 
         Swal.fire({
-            title: "กำลังส่งข้อมูล...",
+            title: "กำลังบันทึกข้อมูล...",
+            text: "ระบบจะบันทึกข้อมูลเท่านั้น ยังไม่ส่งข้อความเข้า LINE",
             allowOutsideClick: false,
             didOpen: () => {
                 Swal.showLoading();
@@ -1834,7 +1901,11 @@ HTML_TEMPLATE = r'''
                 throw new Error(data.error);
             }
 
-            Swal.fire("สำเร็จ", "ส่งข้อมูลเข้ากลุ่มกิจการนักเรียนเรียบร้อย", "success");
+            Swal.fire(
+                "สำเร็จ",
+                "บันทึกข้อมูลเข้าระบบเรียบร้อยแล้ว โดยยังไม่ส่งข้อความเข้ากลุ่ม LINE",
+                "success"
+            );
 
             draftList = [];
             document.getElementById("activity_type").value = "";
@@ -2054,6 +2125,7 @@ HTML_TEMPLATE = r'''
 
         const result = await Swal.fire({
             title: "ยืนยันส่งรายงานเข้ากลุ่ม LINE?",
+            text: "ระบบจะใช้โควตา Messaging API เฉพาะเมื่อกดปุ่มนี้เท่านั้น",
             icon: "question",
             showCancelButton: true,
             confirmButtonText: "ส่งรายงาน",
@@ -2404,4 +2476,6 @@ def health_check():
         "liff_id": LIFF_ID,
         "liff_url": LIFF_URL,
         "student_affairs_group_id": STUDENT_AFFAIRS_GROUP_ID,
+        "auto_line_notify_on_behavior_submit": False,
+        "line_report_sending_mode": "manual_only",
     }
