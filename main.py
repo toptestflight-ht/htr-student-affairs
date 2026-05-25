@@ -1,1304 +1,2523 @@
 import os
+
 from datetime import datetime, timedelta
+
 from typing import List, Optional, Dict, Any
 
 import pytz
+
 from fastapi import FastAPI, Request, HTTPException
+
 from fastapi.responses import HTMLResponse, JSONResponse
+
 from pydantic import BaseModel
+
 from supabase import create_client, Client
 
 from linebot import LineBotApi, WebhookHandler
+
 from linebot.exceptions import InvalidSignatureError
+
 from linebot.models import TextSendMessage, MessageEvent, TextMessage
 
-
 # =========================================================
+
 # CONFIG & SETUP
+
 # =========================================================
 
 app = FastAPI(title="ระบบงานกิจการนักเรียน โรงเรียนหารเทารังสีประชาสรรค์")
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
+
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 STUDENT_AFFAIRS_GROUP_ID = os.environ.get("STUDENT_AFFAIRS_GROUP_ID")
 
 LIFF_ID = os.environ.get("LIFF_ID", "2010184816-R1BNqd1n")
-LIFF_URL = os.environ.get("LIFF_URL", f"https://liff.line.me/2010184816-R1BNqd1n")
+
+LIFF_URL = os.environ.get("LIFF_URL", f"https://liff.line.me/{LIFF_ID}")
 
 BANGKOK_TZ = pytz.timezone("Asia/Bangkok")
 
 if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
+
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
 else:
+
     line_bot_api = None
+
     handler = None
 
 if SUPABASE_URL and SUPABASE_KEY:
+
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 else:
+
     supabase = None
 
-
 def require_supabase() -> Client:
+
     if not supabase:
+
         raise HTTPException(status_code=500, detail="Supabase is not configured.")
+
     return supabase
 
-
 def now_bangkok() -> datetime:
+
     return datetime.now(BANGKOK_TZ)
 
-
 # =========================================================
+
 # MODELS
+
 # =========================================================
 
 class BehaviorRecord(BaseModel):
+
     student_id: str
+
     student_name: str
+
     room: str
+
     offense_name: str
+
     points_deducted: int
+
     reason: Optional[str] = ""
 
-
 class ReportRequest(BaseModel):
+
     teacher_id: str
+
     activity_type: str
+
     records: List[BehaviorRecord]
 
-
 class NewStudent(BaseModel):
+
     student_id: str
+
     name: str
+
     room: str
 
-
 class AuthRequest(BaseModel):
+
     line_user_id: str
+
     display_name: Optional[str] = ""
 
-
 class UpdateRoleRequest(BaseModel):
+
     admin_line_user_id: str
+
     target_line_user_id: str
+
     role: str
 
-
 class UpdateUserStatusRequest(BaseModel):
-    admin_line_user_id: str
-    target_line_user_id: str
-    is_active: bool
 
+    admin_line_user_id: str
+
+    target_line_user_id: str
+
+    is_active: bool
 
 class SystemSettingsRequest(BaseModel):
+
     super_admin_line_user_id: str
+
     academic_year: int
+
     semester: int
+
     base_score: int
+
     warning_threshold: int
+
     risk_threshold: int
+
     repeat_offense_threshold: int
 
-
 class SendPeriodReportRequest(BaseModel):
+
     admin_line_user_id: str
+
     period: str
 
-
 class ClearBehaviorLogsRequest(BaseModel):
+
     super_admin_line_user_id: str
+
     confirm_text: str
 
-
 class OffenseRuleRequest(BaseModel):
+
     super_admin_line_user_id: str
+
     rule_name: str
+
     default_points: int
+
     require_manual_score: bool
+
     behavior_type: str
+
     is_active: bool = True
 
-
 class UpdateOffenseRuleRequest(BaseModel):
+
     super_admin_line_user_id: str
+
     rule_id: int
+
     rule_name: str
+
     default_points: int
+
     require_manual_score: bool
+
     behavior_type: str
+
     is_active: bool
 
-
 class DeleteOffenseRuleRequest(BaseModel):
+
     super_admin_line_user_id: str
+
     rule_id: int
 
+class UpdateBehaviorLogRequest(BaseModel):
+
+    admin_line_user_id: str
+
+    log_id: str
+
+    activity_type: str
+
+    offense_name: str
+
+    points_deducted: int
+
+    reason: Optional[str] = ""
+
+class DeleteBehaviorLogRequest(BaseModel):
+
+    admin_line_user_id: str
+
+    log_id: str
+
+class StudentScoreRequest(BaseModel):
+
+    line_user_id: str
+
+    student_id: str
+
+    student_name: str
+
+    room: str
 
 # =========================================================
+
 # ROLE & PERMISSION
+
 # =========================================================
 
 ROLE_LEVELS = {
+
     "super_admin": 5,
+
     "admin": 4,
+
     "teacher": 3,
+
     "viewer": 2,
+
     "inactive": 1,
+
 }
 
-
 def get_menus_by_role(role: str):
+
     if role == "super_admin":
+
         return [
+
             {"id": "report", "label": "แจ้ง", "icon": "fa-paper-plane"},
+
+            {"id": "student_score", "label": "คะแนน", "icon": "fa-magnifying-glass-chart"},
+
             {"id": "add", "label": "เพิ่ม", "icon": "fa-user-plus"},
+
             {"id": "daily_report", "label": "วันนี้", "icon": "fa-calendar-day"},
+
             {"id": "weekly_report", "label": "สัปดาห์", "icon": "fa-calendar-week"},
+
             {"id": "monthly_report", "label": "เดือน", "icon": "fa-calendar-days"},
+
             {"id": "report_summary", "label": "ล่าสุด", "icon": "fa-list"},
+
             {"id": "manage_users", "label": "สิทธิ์", "icon": "fa-user-gear"},
+
+            {"id": "audit_logs", "label": "Logs", "icon": "fa-clock-rotate-left"},
+
             {"id": "system_settings", "label": "ตั้งค่า", "icon": "fa-gear"},
+
         ]
 
     if role == "admin":
+
         return [
+
             {"id": "report", "label": "แจ้ง", "icon": "fa-paper-plane"},
+
+            {"id": "student_score", "label": "คะแนน", "icon": "fa-magnifying-glass-chart"},
+
             {"id": "add", "label": "เพิ่ม", "icon": "fa-user-plus"},
+
             {"id": "daily_report", "label": "วันนี้", "icon": "fa-calendar-day"},
+
             {"id": "weekly_report", "label": "สัปดาห์", "icon": "fa-calendar-week"},
+
             {"id": "monthly_report", "label": "เดือน", "icon": "fa-calendar-days"},
+
             {"id": "report_summary", "label": "ล่าสุด", "icon": "fa-list"},
+
             {"id": "manage_users", "label": "สิทธิ์", "icon": "fa-user-gear"},
+
         ]
 
     if role == "viewer":
+
         return [
+
+            {"id": "student_score", "label": "คะแนน", "icon": "fa-magnifying-glass-chart"},
+
             {"id": "daily_report", "label": "วันนี้", "icon": "fa-calendar-day"},
+
             {"id": "weekly_report", "label": "สัปดาห์", "icon": "fa-calendar-week"},
+
             {"id": "monthly_report", "label": "เดือน", "icon": "fa-calendar-days"},
+
         ]
 
     return [
+
         {"id": "report", "label": "แจ้ง", "icon": "fa-paper-plane"},
+
+        {"id": "student_score", "label": "คะแนน", "icon": "fa-magnifying-glass-chart"},
+
         {"id": "add", "label": "เพิ่ม", "icon": "fa-user-plus"},
+
     ]
 
-
 def get_user_record(line_user_id: str):
+
     db = require_supabase()
+
     res = (
+
         db.table("users")
+
         .select("line_user_id, display_name, role, is_active")
+
         .eq("line_user_id", line_user_id)
+
         .limit(1)
+
         .execute()
+
     )
+
     if res.data:
+
         return res.data[0]
+
     return None
 
-
 def get_user_role(line_user_id: str) -> str:
+
     user = get_user_record(line_user_id)
+
     if not user:
+
         return "teacher"
 
     role = user.get("role", "teacher")
 
     if role == "inactive" or not user.get("is_active", True):
+
         raise HTTPException(status_code=403, detail="บัญชีนี้ถูกระงับการใช้งาน")
 
     return role
 
-
 def get_display_name(line_user_id: str) -> str:
+
     user = get_user_record(line_user_id)
+
     if user:
+
         return user.get("display_name") or "คุณครู"
+
     return "คุณครู"
 
-
 def require_admin_or_higher(line_user_id: str):
+
     role = get_user_role(line_user_id)
+
     if ROLE_LEVELS.get(role, 0) < ROLE_LEVELS["admin"]:
+
         raise HTTPException(status_code=403, detail="Admin permission required.")
 
-
 def require_super_admin(line_user_id: str):
+
     role = get_user_role(line_user_id)
+
     if role != "super_admin":
+
         raise HTTPException(status_code=403, detail="Super admin permission required.")
 
-
 # =========================================================
-# SETTINGS & REPORT HELPERS
+
+# HELPERS
+
 # =========================================================
 
 def get_system_settings():
+
     db = require_supabase()
+
     res = db.table("system_settings").select("*").eq("id", 1).limit(1).execute()
 
     if res.data:
+
         return res.data[0]
 
     return {
+
         "id": 1,
+
         "academic_year": 2568,
+
         "semester": 1,
+
         "base_score": 100,
+
         "warning_threshold": 80,
+
         "risk_threshold": 60,
+
         "repeat_offense_threshold": 3,
+
     }
 
-
 def get_period_range(period: str):
+
     now = now_bangkok()
 
     if period == "daily":
+
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
         end = start + timedelta(days=1)
+
         title = "รายงานวันนี้"
 
     elif period == "weekly":
+
         start = (now - timedelta(days=now.weekday())).replace(
+
             hour=0, minute=0, second=0, microsecond=0
+
         )
+
         end = start + timedelta(days=7)
+
         title = "รายงานสัปดาห์นี้"
 
     elif period == "monthly":
+
         start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
         if start.month == 12:
+
             end = start.replace(year=start.year + 1, month=1)
+
         else:
+
             end = start.replace(month=start.month + 1)
 
         title = "รายงานเดือนนี้"
 
     else:
+
         raise HTTPException(status_code=400, detail="Invalid report period.")
 
     return start, end, title
 
+def normalize_points_by_behavior_type(points: int, behavior_type: str) -> int:
+
+    abs_points = abs(int(points or 0))
+
+    if behavior_type == "positive":
+
+        return abs_points
+
+    return -abs_points
+
+def get_rule_by_name(rule_name: str):
+
+    db = require_supabase()
+
+    res = (
+
+        db.table("offense_rules")
+
+        .select("*")
+
+        .eq("rule_name", rule_name)
+
+        .limit(1)
+
+        .execute()
+
+    )
+
+    if res.data:
+
+        return res.data[0]
+
+    return None
 
 def summarize_logs(logs: List[Dict[str, Any]]):
+
     by_offense: Dict[str, Dict[str, Any]] = {}
+
     by_room: Dict[str, Dict[str, Any]] = {}
+
     by_activity: Dict[str, Dict[str, Any]] = {}
+
     by_teacher: Dict[str, Dict[str, Any]] = {}
+
     by_student: Dict[str, Dict[str, Any]] = {}
 
     total_records = len(logs)
+
     total_points = 0
+
     total_negative = 0
+
     total_positive = 0
 
     for log in logs:
+
         offense = log.get("offense_name") or "ไม่ระบุ"
+
         room = log.get("room") or "ไม่ระบุ"
+
         activity = log.get("activity_type") or "ไม่ระบุ"
+
         teacher = log.get("teacher_id") or "ไม่ระบุ"
+
         student_key = f"{log.get('student_id') or '-'}|{log.get('student_name') or '-'}|{room}"
 
         points = int(log.get("points_deducted") or 0)
+
         total_points += points
 
         if points < 0:
+
             total_negative += points
+
         elif points > 0:
+
             total_positive += points
 
         for bucket, key, name in [
+
             (by_offense, offense, offense),
+
             (by_room, room, room),
+
             (by_activity, activity, activity),
+
             (by_teacher, teacher, teacher),
+
         ]:
+
             if key not in bucket:
-                bucket[key] = {"name": name, "count": 0, "points": 0}
+
+                bucket[key] = {
+
+                    "name": name,
+
+                    "count": 0,
+
+                    "points": 0,
+
+                }
+
             bucket[key]["count"] += 1
+
             bucket[key]["points"] += points
 
         if student_key not in by_student:
+
             by_student[student_key] = {
+
                 "name": log.get("student_name") or log.get("student_id") or "-",
+
                 "student_id": log.get("student_id") or "-",
+
                 "room": room,
+
                 "count": 0,
+
                 "points": 0,
+
             }
 
         by_student[student_key]["count"] += 1
+
         by_student[student_key]["points"] += points
 
     def sort_items(data):
+
         return sorted(data.values(), key=lambda x: x["count"], reverse=True)
 
     return {
+
         "total_records": total_records,
+
         "total_points": total_points,
+
         "total_negative": total_negative,
+
         "total_positive": total_positive,
+
         "by_offense": sort_items(by_offense),
+
         "by_room": sort_items(by_room),
+
         "by_activity": sort_items(by_activity),
+
         "by_teacher": sort_items(by_teacher),
+
         "by_student": sort_items(by_student),
+
     }
 
-
 def build_period_report_text(period_data: Dict[str, Any]) -> str:
+
     summary = period_data.get("summary", {})
+
     title = period_data.get("title", "รายงาน")
 
     lines = [
+
         f"📊 {title}",
+
         f"รายการทั้งหมด: {summary.get('total_records', 0)} รายการ",
+
         f"คะแนนหักรวม: {summary.get('total_negative', 0)}",
+
         f"คะแนนบวกรวม: {summary.get('total_positive', 0)}",
+
         f"คะแนนสุทธิ: {summary.get('total_points', 0)}",
+
         "-" * 24,
+
         "📌 แยกตามพฤติกรรม",
+
     ]
 
     for item in summary.get("by_offense", [])[:10]:
+
         lines.append(
+
             f"- {item['name']}: {item['count']} รายการ ({item['points']} คะแนน)"
+
         )
 
     lines.append("\n🏫 แยกตามห้อง")
 
     for item in summary.get("by_room", [])[:10]:
+
         lines.append(
+
             f"- {item['name']}: {item['count']} รายการ ({item['points']} คะแนน)"
+
         )
 
     lines.append("\n👥 นักเรียนที่มีรายการมากที่สุด")
 
     for item in summary.get("by_student", [])[:10]:
+
         lines.append(
+
             f"- {item['name']} ({item['room']}): {item['count']} รายการ ({item['points']} คะแนน)"
+
         )
 
     return "\n".join(lines)
 
-
-def normalize_points_by_behavior_type(points: int, behavior_type: str) -> int:
-    abs_points = abs(int(points or 0))
-
-    if behavior_type == "positive":
-        return abs_points
-
-    return -abs_points
-
-
-def get_rule_by_name(rule_name: str):
-    db = require_supabase()
-    res = (
-        db.table("offense_rules")
-        .select("*")
-        .eq("rule_name", rule_name)
-        .limit(1)
-        .execute()
-    )
-    if res.data:
-        return res.data[0]
-    return None
-
-
 # =========================================================
-# BACKEND APIs
+
+# BASIC APIs
+
 # =========================================================
 
 @app.post("/api/auth/check")
+
 def check_user_role(req: AuthRequest):
+
     try:
+
         db = require_supabase()
 
         res = (
+
             db.table("users")
+
             .select("line_user_id, display_name, role, is_active")
+
             .eq("line_user_id", req.line_user_id)
+
             .limit(1)
+
             .execute()
+
         )
 
         if res.data and len(res.data) > 0:
+
             user = res.data[0]
+
             role = user.get("role", "teacher")
 
             if role == "inactive" or not user.get("is_active", True):
+
                 return JSONResponse(
+
                     {"status": "error", "error": "บัญชีนี้ถูกระงับการใช้งาน"},
+
                     status_code=403,
+
                 )
 
             return {
+
                 "status": "success",
+
                 "user": {
+
                     "line_user_id": user["line_user_id"],
+
                     "display_name": user.get("display_name") or req.display_name,
+
                     "role": role,
+
                 },
+
                 "menus": get_menus_by_role(role),
+
                 "settings": get_system_settings(),
+
             }
 
         db.table("users").insert(
+
             {
+
                 "line_user_id": req.line_user_id,
+
                 "display_name": req.display_name,
+
                 "role": "teacher",
+
                 "is_active": True,
+
             }
+
         ).execute()
 
         return {
+
             "status": "success",
+
             "user": {
+
                 "line_user_id": req.line_user_id,
+
                 "display_name": req.display_name,
+
                 "role": "teacher",
+
             },
+
             "menus": get_menus_by_role("teacher"),
+
             "settings": get_system_settings(),
+
         }
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.get("/api/init")
+
 def get_init_data():
+
     try:
+
         db = require_supabase()
 
         rules = (
+
             db.table("offense_rules")
+
             .select("*")
+
             .eq("is_active", True)
+
             .order("behavior_type")
+
             .order("id")
+
             .execute()
+
         )
 
         return {
+
             "status": "success",
+
             "rules": rules.data or [],
+
             "settings": get_system_settings(),
+
         }
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.get("/api/students/search")
+
 def search_students(q: str):
+
     try:
+
         db = require_supabase()
 
         res = (
+
             db.table("students")
+
             .select("id, student_id, name, room")
+
             .or_(f"name.ilike.%{q}%,student_id.ilike.%{q}%,room.ilike.%{q}%")
+
             .limit(30)
+
             .execute()
+
         )
 
-        return {"status": "success", "results": res.data or []}
+        return {
+
+            "status": "success",
+
+            "results": res.data or [],
+
+        }
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+@app.post("/api/students/score")
+
+def get_student_score(req: StudentScoreRequest):
+
+    try:
+
+        role = get_user_role(req.line_user_id)
+
+        if role not in ["super_admin", "admin", "teacher", "viewer"]:
+
+            raise HTTPException(status_code=403, detail="Permission denied.")
+
+        db = require_supabase()
+
+        settings = get_system_settings()
+
+        base_score = int(settings.get("base_score") or 100)
+
+        logs = (
+
+            db.table("behavior_logs")
+
+            .select("*")
+
+            .eq("student_id", req.student_id)
+
+            .eq("student_name", req.student_name)
+
+            .eq("room", req.room)
+
+            .eq("is_deleted", False)
+
+            .order("created_at", desc=True)
+
+            .execute()
+
+        )
+
+        data = logs.data or []
+
+        total_points = sum(int(x.get("points_deducted") or 0) for x in data)
+
+        current_score = base_score + total_points
+
+        total_positive = sum(
+
+            int(x.get("points_deducted") or 0)
+
+            for x in data
+
+            if int(x.get("points_deducted") or 0) > 0
+
+        )
+
+        total_negative = sum(
+
+            int(x.get("points_deducted") or 0)
+
+            for x in data
+
+            if int(x.get("points_deducted") or 0) < 0
+
+        )
+
+        return {
+
+            "status": "success",
+
+            "student": {
+
+                "student_id": req.student_id,
+
+                "student_name": req.student_name,
+
+                "room": req.room,
+
+            },
+
+            "base_score": base_score,
+
+            "total_points": total_points,
+
+            "total_positive": total_positive,
+
+            "total_negative": total_negative,
+
+            "current_score": current_score,
+
+            "logs": data,
+
+        }
+
+    except HTTPException as e:
+
+        raise e
+
+    except Exception as e:
+
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 @app.post("/api/students/add")
+
 def add_student(student: NewStudent):
+
     try:
+
         db = require_supabase()
 
         check = (
+
             db.table("students")
+
             .select("id")
+
             .eq("student_id", student.student_id)
+
             .eq("name", student.name)
+
             .eq("room", student.room)
+
             .limit(1)
+
             .execute()
+
         )
 
         if check.data and len(check.data) > 0:
+
             return JSONResponse(
+
                 {"status": "error", "error": "ข้อมูลนักเรียนนี้มีในระบบแล้ว"},
+
                 status_code=400,
+
             )
 
         db.table("students").insert(
+
             {
+
                 "student_id": student.student_id,
+
                 "name": student.name,
+
                 "room": student.room,
+
             }
+
         ).execute()
 
         return {"status": "success"}
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/report-behavior")
+
 def report_behavior(req: ReportRequest):
+
     try:
+
         db = require_supabase()
+
         role = get_user_role(req.teacher_id)
 
         if role not in ["super_admin", "admin", "teacher"]:
+
             raise HTTPException(status_code=403, detail="Permission denied.")
 
         now = now_bangkok()
+
         settings = get_system_settings()
 
         if not req.records:
+
             return JSONResponse(
+
                 {"status": "error", "error": "ไม่มีข้อมูลนักเรียนที่ต้องการบันทึก"},
+
                 status_code=400,
+
             )
 
         log_entries = []
 
         for r in req.records:
+
             rule = get_rule_by_name(r.offense_name)
+
             behavior_type = rule.get("behavior_type", "negative") if rule else "negative"
+
             normalized_points = normalize_points_by_behavior_type(
+
                 r.points_deducted,
+
                 behavior_type,
+
             )
 
             log_entries.append(
+
                 {
+
                     "student_id": r.student_id,
+
                     "student_name": r.student_name,
+
                     "room": r.room,
+
                     "teacher_id": req.teacher_id,
+
                     "activity_type": req.activity_type,
+
                     "offense_name": r.offense_name,
+
                     "points_deducted": normalized_points,
+
                     "reason": r.reason,
+
                     "academic_year": settings.get("academic_year"),
+
                     "semester": settings.get("semester"),
+
+                    "is_deleted": False,
+
                     "created_at": now.isoformat(),
+
                 }
+
             )
 
         db.table("behavior_logs").insert(log_entries).execute()
 
+        db.table("audit_logs").insert(
+
+            {
+
+                "actor_line_user_id": req.teacher_id,
+
+                "action": "CREATE_BEHAVIOR_LOG",
+
+                "target_type": "behavior_logs",
+
+                "target_id": "BATCH",
+
+                "detail": {
+
+                    "saved_count": len(log_entries),
+
+                    "activity_type": req.activity_type,
+
+                    "records": log_entries,
+
+                },
+
+                "created_at": now.isoformat(),
+
+            }
+
+        ).execute()
+
         return {
+
             "status": "success",
+
             "message": "บันทึกข้อมูลเรียบร้อยแล้ว โดยยังไม่ส่งข้อความเข้ากลุ่ม LINE",
+
             "saved_count": len(log_entries),
+
         }
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 # =========================================================
+
 # ADMIN / SUPER ADMIN APIs
+
 # =========================================================
 
 @app.get("/api/admin/users")
+
 def list_users(admin_line_user_id: str):
+
     try:
+
         require_admin_or_higher(admin_line_user_id)
 
         db = require_supabase()
+
         actor_role = get_user_role(admin_line_user_id)
 
         res = (
+
             db.table("users")
+
             .select("line_user_id, display_name, role, is_active, created_at, updated_at")
+
             .order("created_at", desc=True)
+
             .execute()
+
         )
 
         users = res.data or []
 
         role_order = {
+
             "super_admin": 1,
+
             "admin": 2,
+
             "teacher": 3,
+
             "viewer": 4,
+
             "inactive": 5,
+
         }
 
         users = sorted(
+
             users,
+
             key=lambda x: (
+
                 role_order.get(x.get("role", "teacher"), 99),
+
                 x.get("display_name") or "",
+
             ),
+
         )
 
-        return {"status": "success", "actor_role": actor_role, "users": users}
+        return {
+
+            "status": "success",
+
+            "actor_role": actor_role,
+
+            "users": users,
+
+        }
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/admin/users/update-role")
+
 def update_user_role(req: UpdateRoleRequest):
+
     try:
+
         actor_role = get_user_role(req.admin_line_user_id)
 
         if actor_role not in ["super_admin", "admin"]:
+
             raise HTTPException(status_code=403, detail="Admin permission required.")
 
         if req.role not in ["super_admin", "admin", "teacher", "viewer", "inactive"]:
+
             return JSONResponse(
+
                 {"status": "error", "error": "Invalid role"},
+
                 status_code=400,
+
             )
 
         target = get_user_record(req.target_line_user_id)
+
         target_role = target.get("role", "teacher") if target else "teacher"
 
         if actor_role != "super_admin":
+
             if req.role in ["super_admin", "admin"]:
+
                 raise HTTPException(
+
                     status_code=403,
+
                     detail="Admin cannot assign admin or super_admin.",
+
                 )
 
             if target_role in ["super_admin", "admin"]:
+
                 raise HTTPException(
+
                     status_code=403,
+
                     detail="Admin cannot edit admin or super_admin.",
+
                 )
 
         db = require_supabase()
+
         now = now_bangkok()
 
         db.table("users").update(
+
             {
+
                 "role": req.role,
+
                 "is_active": req.role != "inactive",
+
                 "updated_at": now.isoformat(),
+
             }
+
         ).eq("line_user_id", req.target_line_user_id).execute()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.admin_line_user_id,
+
                 "action": "UPDATE_USER_ROLE",
+
                 "target_type": "users",
+
                 "target_id": req.target_line_user_id,
-                "detail": {"old_role": target_role, "new_role": req.role},
+
+                "detail": {
+
+                    "old_role": target_role,
+
+                    "new_role": req.role,
+
+                },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/admin/users/update-status")
+
 def update_user_status(req: UpdateUserStatusRequest):
+
     try:
+
         actor_role = get_user_role(req.admin_line_user_id)
 
         if actor_role not in ["super_admin", "admin"]:
+
             raise HTTPException(status_code=403, detail="Admin permission required.")
 
         target = get_user_record(req.target_line_user_id)
+
         target_role = target.get("role", "teacher") if target else "teacher"
 
         if actor_role != "super_admin" and target_role in ["super_admin", "admin"]:
+
             raise HTTPException(status_code=403, detail="Admin cannot update this user.")
 
         db = require_supabase()
+
         now = now_bangkok()
 
         update_data = {
+
             "is_active": req.is_active,
+
             "updated_at": now.isoformat(),
+
         }
 
         if not req.is_active:
+
             update_data["role"] = "inactive"
+
         elif target_role == "inactive":
+
             update_data["role"] = "teacher"
 
         db.table("users").update(update_data).eq(
+
             "line_user_id",
+
             req.target_line_user_id,
+
         ).execute()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.admin_line_user_id,
+
                 "action": "UPDATE_USER_STATUS",
+
                 "target_type": "users",
+
                 "target_id": req.target_line_user_id,
-                "detail": {"is_active": req.is_active},
+
+                "detail": {
+
+                    "is_active": req.is_active,
+
+                },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.get("/api/admin/report-summary")
+
 def report_summary(admin_line_user_id: str):
+
     try:
+
         require_admin_or_higher(admin_line_user_id)
 
         db = require_supabase()
 
         logs = (
+
             db.table("behavior_logs")
+
             .select("*")
+
+            .eq("is_deleted", False)
+
             .order("created_at", desc=True)
+
             .limit(100)
+
             .execute()
+
         )
-
-        return {"status": "success", "logs": logs.data or []}
-
-    except HTTPException as e:
-        raise e
-
-    except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
-
-
-@app.get("/api/admin/report-period")
-def report_period(admin_line_user_id: str, period: str):
-    try:
-        role = get_user_role(admin_line_user_id)
-
-        if role not in ["super_admin", "admin", "viewer"]:
-            raise HTTPException(status_code=403, detail="Report permission required.")
-
-        start, end, title = get_period_range(period)
-        db = require_supabase()
-
-        logs = (
-            db.table("behavior_logs")
-            .select("*")
-            .gte("created_at", start.isoformat())
-            .lt("created_at", end.isoformat())
-            .order("created_at", desc=True)
-            .execute()
-        )
-
-        data = logs.data or []
-        summary = summarize_logs(data)
 
         return {
+
             "status": "success",
-            "period": period,
-            "title": title,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "summary": summary,
-            "logs": data[:100],
+
+            "logs": logs.data or [],
+
         }
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+@app.get("/api/admin/report-period")
 
-@app.post("/api/admin/send-period-report")
-def send_period_report(req: SendPeriodReportRequest):
+def report_period(admin_line_user_id: str, period: str):
+
     try:
-        require_admin_or_higher(req.admin_line_user_id)
 
-        start, end, title = get_period_range(req.period)
+        role = get_user_role(admin_line_user_id)
+
+        if role not in ["super_admin", "admin", "viewer"]:
+
+            raise HTTPException(status_code=403, detail="Report permission required.")
+
+        start, end, title = get_period_range(period)
+
         db = require_supabase()
 
         logs = (
+
             db.table("behavior_logs")
+
             .select("*")
+
+            .eq("is_deleted", False)
+
             .gte("created_at", start.isoformat())
+
             .lt("created_at", end.isoformat())
+
             .order("created_at", desc=True)
+
             .execute()
+
         )
 
         data = logs.data or []
+
+        summary = summarize_logs(data)
+
+        return {
+
+            "status": "success",
+
+            "period": period,
+
+            "title": title,
+
+            "start": start.isoformat(),
+
+            "end": end.isoformat(),
+
+            "summary": summary,
+
+            "logs": data[:100],
+
+        }
+
+    except HTTPException as e:
+
+        raise e
+
+    except Exception as e:
+
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/send-period-report")
+
+def send_period_report(req: SendPeriodReportRequest):
+
+    try:
+
+        require_admin_or_higher(req.admin_line_user_id)
+
+        start, end, title = get_period_range(req.period)
+
+        db = require_supabase()
+
+        logs = (
+
+            db.table("behavior_logs")
+
+            .select("*")
+
+            .eq("is_deleted", False)
+
+            .gte("created_at", start.isoformat())
+
+            .lt("created_at", end.isoformat())
+
+            .order("created_at", desc=True)
+
+            .execute()
+
+        )
+
+        data = logs.data or []
+
         summary = summarize_logs(data)
 
         period_data = {
+
             "period": req.period,
+
             "title": title,
+
             "start": start.isoformat(),
+
             "end": end.isoformat(),
+
             "summary": summary,
+
             "logs": data[:100],
+
         }
 
         report_text = build_period_report_text(period_data)
 
         if line_bot_api and STUDENT_AFFAIRS_GROUP_ID:
+
             line_bot_api.push_message(
+
                 STUDENT_AFFAIRS_GROUP_ID,
+
                 TextSendMessage(text=report_text),
+
             )
+
         else:
+
             return JSONResponse(
+
                 {
+
                     "status": "error",
+
                     "error": "LINE Bot หรือ STUDENT_AFFAIRS_GROUP_ID ยังไม่ได้ตั้งค่า",
+
                 },
+
                 status_code=500,
+
             )
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+@app.post("/api/admin/behavior-log/update")
+
+def update_behavior_log(req: UpdateBehaviorLogRequest):
+
+    try:
+
+        role = get_user_role(req.admin_line_user_id)
+
+        if role not in ["super_admin", "admin"]:
+
+            raise HTTPException(status_code=403, detail="Admin permission required.")
+
+        db = require_supabase()
+
+        now = now_bangkok()
+
+        old_log = (
+
+            db.table("behavior_logs")
+
+            .select("*")
+
+            .eq("id", req.log_id)
+
+            .eq("is_deleted", False)
+
+            .limit(1)
+
+            .execute()
+
+        )
+
+        if not old_log.data:
+
+            return JSONResponse(
+
+                {"status": "error", "error": "ไม่พบรายการที่ต้องการแก้ไข"},
+
+                status_code=404,
+
+            )
+
+        rule = get_rule_by_name(req.offense_name)
+
+        behavior_type = rule.get("behavior_type", "negative") if rule else "negative"
+
+        normalized_points = normalize_points_by_behavior_type(
+
+            req.points_deducted,
+
+            behavior_type,
+
+        )
+
+        db.table("behavior_logs").update(
+
+            {
+
+                "activity_type": req.activity_type,
+
+                "offense_name": req.offense_name,
+
+                "points_deducted": normalized_points,
+
+                "reason": req.reason,
+
+                "updated_by": req.admin_line_user_id,
+
+                "updated_at": now.isoformat(),
+
+            }
+
+        ).eq("id", req.log_id).execute()
+
+        db.table("audit_logs").insert(
+
+            {
+
+                "actor_line_user_id": req.admin_line_user_id,
+
+                "action": "UPDATE_BEHAVIOR_LOG",
+
+                "target_type": "behavior_logs",
+
+                "target_id": req.log_id,
+
+                "detail": {
+
+                    "old": old_log.data[0],
+
+                    "new": {
+
+                        "activity_type": req.activity_type,
+
+                        "offense_name": req.offense_name,
+
+                        "points_deducted": normalized_points,
+
+                        "reason": req.reason,
+
+                    },
+
+                },
+
+                "created_at": now.isoformat(),
+
+            }
+
+        ).execute()
+
+        return {"status": "success"}
+
+    except HTTPException as e:
+
+        raise e
+
+    except Exception as e:
+
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+@app.post("/api/admin/behavior-log/delete")
+
+def delete_behavior_log(req: DeleteBehaviorLogRequest):
+
+    try:
+
+        role = get_user_role(req.admin_line_user_id)
+
+        if role not in ["super_admin", "admin"]:
+
+            raise HTTPException(status_code=403, detail="Admin permission required.")
+
+        db = require_supabase()
+
+        now = now_bangkok()
+
+        old_log = (
+
+            db.table("behavior_logs")
+
+            .select("*")
+
+            .eq("id", req.log_id)
+
+            .eq("is_deleted", False)
+
+            .limit(1)
+
+            .execute()
+
+        )
+
+        if not old_log.data:
+
+            return JSONResponse(
+
+                {"status": "error", "error": "ไม่พบรายการที่ต้องการลบ"},
+
+                status_code=404,
+
+            )
+
+        db.table("behavior_logs").update(
+
+            {
+
+                "is_deleted": True,
+
+                "deleted_by": req.admin_line_user_id,
+
+                "deleted_at": now.isoformat(),
+
+                "updated_by": req.admin_line_user_id,
+
+                "updated_at": now.isoformat(),
+
+            }
+
+        ).eq("id", req.log_id).execute()
+
+        db.table("audit_logs").insert(
+
+            {
+
+                "actor_line_user_id": req.admin_line_user_id,
+
+                "action": "DELETE_BEHAVIOR_LOG",
+
+                "target_type": "behavior_logs",
+
+                "target_id": req.log_id,
+
+                "detail": {
+
+                    "deleted_log": old_log.data[0],
+
+                },
+
+                "created_at": now.isoformat(),
+
+            }
+
+        ).execute()
+
+        return {"status": "success"}
+
+    except HTTPException as e:
+
+        raise e
+
+    except Exception as e:
+
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 # =========================================================
-# SUPER ADMIN SETTINGS / RULES
+
+# SUPER ADMIN SETTINGS / RULES / LOGS
+
 # =========================================================
 
 @app.get("/api/super-admin/settings")
+
 def get_settings(super_admin_line_user_id: str):
+
     try:
+
         require_super_admin(super_admin_line_user_id)
-        return {"status": "success", "settings": get_system_settings()}
+
+        return {
+
+            "status": "success",
+
+            "settings": get_system_settings(),
+
+        }
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/super-admin/settings")
+
 def update_system_settings(req: SystemSettingsRequest):
+
     try:
+
         require_super_admin(req.super_admin_line_user_id)
 
         db = require_supabase()
+
         now = now_bangkok()
 
         db.table("system_settings").update(
+
             {
+
                 "academic_year": req.academic_year,
+
                 "semester": req.semester,
+
                 "base_score": req.base_score,
+
                 "warning_threshold": req.warning_threshold,
+
                 "risk_threshold": req.risk_threshold,
+
                 "repeat_offense_threshold": req.repeat_offense_threshold,
+
                 "updated_by": req.super_admin_line_user_id,
+
                 "updated_at": now.isoformat(),
+
             }
+
         ).eq("id", 1).execute()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.super_admin_line_user_id,
+
                 "action": "UPDATE_SYSTEM_SETTINGS",
+
                 "target_type": "system_settings",
+
                 "target_id": "1",
+
                 "detail": {
+
                     "academic_year": req.academic_year,
+
                     "semester": req.semester,
+
                     "base_score": req.base_score,
+
                     "warning_threshold": req.warning_threshold,
+
                     "risk_threshold": req.risk_threshold,
+
                     "repeat_offense_threshold": req.repeat_offense_threshold,
+
                 },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
-        return {"status": "success", "settings": get_system_settings()}
+        return {
+
+            "status": "success",
+
+            "settings": get_system_settings(),
+
+        }
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.get("/api/super-admin/offense-rules")
+
 def list_offense_rules(super_admin_line_user_id: str):
+
     try:
+
         require_super_admin(super_admin_line_user_id)
 
         db = require_supabase()
 
         rules = (
+
             db.table("offense_rules")
+
             .select("*")
+
             .order("behavior_type")
+
             .order("id")
+
             .execute()
+
         )
 
-        return {"status": "success", "rules": rules.data or []}
+        return {
+
+            "status": "success",
+
+            "rules": rules.data or [],
+
+        }
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/super-admin/offense-rules/add")
+
 def add_offense_rule(req: OffenseRuleRequest):
+
     try:
+
         require_super_admin(req.super_admin_line_user_id)
 
         if req.behavior_type not in ["positive", "negative"]:
+
             return JSONResponse(
+
                 {"status": "error", "error": "behavior_type ต้องเป็น positive หรือ negative"},
+
                 status_code=400,
+
             )
 
         db = require_supabase()
+
         now = now_bangkok()
 
         db.table("offense_rules").insert(
+
             {
+
                 "rule_name": req.rule_name,
+
                 "default_points": abs(req.default_points),
+
                 "require_manual_score": req.require_manual_score,
+
                 "behavior_type": req.behavior_type,
+
                 "is_active": req.is_active,
+
                 "updated_by": req.super_admin_line_user_id,
+
                 "updated_at": now.isoformat(),
+
             }
+
         ).execute()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.super_admin_line_user_id,
+
                 "action": "ADD_OFFENSE_RULE",
+
                 "target_type": "offense_rules",
+
                 "target_id": req.rule_name,
+
                 "detail": {
+
                     "rule_name": req.rule_name,
+
                     "default_points": abs(req.default_points),
+
                     "behavior_type": req.behavior_type,
+
                     "is_active": req.is_active,
+
                 },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/super-admin/offense-rules/update")
+
 def update_offense_rule(req: UpdateOffenseRuleRequest):
+
     try:
+
         require_super_admin(req.super_admin_line_user_id)
 
         if req.behavior_type not in ["positive", "negative"]:
+
             return JSONResponse(
+
                 {"status": "error", "error": "behavior_type ต้องเป็น positive หรือ negative"},
+
                 status_code=400,
+
             )
 
         db = require_supabase()
+
         now = now_bangkok()
 
         db.table("offense_rules").update(
+
             {
+
                 "rule_name": req.rule_name,
+
                 "default_points": abs(req.default_points),
+
                 "require_manual_score": req.require_manual_score,
+
                 "behavior_type": req.behavior_type,
+
                 "is_active": req.is_active,
+
                 "updated_by": req.super_admin_line_user_id,
+
                 "updated_at": now.isoformat(),
+
             }
+
         ).eq("id", req.rule_id).execute()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.super_admin_line_user_id,
+
                 "action": "UPDATE_OFFENSE_RULE",
+
                 "target_type": "offense_rules",
+
                 "target_id": str(req.rule_id),
+
                 "detail": {
+
                     "rule_name": req.rule_name,
+
                     "default_points": abs(req.default_points),
+
                     "behavior_type": req.behavior_type,
+
                     "is_active": req.is_active,
+
                 },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 @app.post("/api/super-admin/offense-rules/delete")
+
 def delete_offense_rule(req: DeleteOffenseRuleRequest):
+
     try:
+
         require_super_admin(req.super_admin_line_user_id)
 
         db = require_supabase()
+
         now = now_bangkok()
 
         db.table("offense_rules").delete().eq("id", req.rule_id).execute()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.super_admin_line_user_id,
+
                 "action": "DELETE_OFFENSE_RULE",
+
                 "target_type": "offense_rules",
+
                 "target_id": str(req.rule_id),
+
                 "detail": {
+
                     "message": "Super admin deleted offense rule.",
+
                 },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+@app.get("/api/super-admin/audit-logs")
+
+def list_audit_logs(super_admin_line_user_id: str):
+
+    try:
+
+        require_super_admin(super_admin_line_user_id)
+
+        db = require_supabase()
+
+        logs = (
+
+            db.table("audit_logs")
+
+            .select("*")
+
+            .order("created_at", desc=True)
+
+            .limit(200)
+
+            .execute()
+
+        )
+
+        return {
+
+            "status": "success",
+
+            "logs": logs.data or [],
+
+        }
+
+    except HTTPException as e:
+
+        raise e
+
+    except Exception as e:
+
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 @app.post("/api/super-admin/clear-behavior-logs")
+
 def clear_behavior_logs(req: ClearBehaviorLogsRequest):
+
     try:
+
         require_super_admin(req.super_admin_line_user_id)
 
         if req.confirm_text != "DELETE_ALL":
+
             return JSONResponse(
+
                 {
+
                     "status": "error",
+
                     "error": "ข้อความยืนยันไม่ถูกต้อง ต้องพิมพ์ DELETE_ALL",
+
                 },
+
                 status_code=400,
+
             )
 
         db = require_supabase()
+
         now = now_bangkok()
 
         db.table("audit_logs").insert(
+
             {
+
                 "actor_line_user_id": req.super_admin_line_user_id,
+
                 "action": "CLEAR_BEHAVIOR_LOGS",
+
                 "target_type": "behavior_logs",
+
                 "target_id": "ALL",
+
                 "detail": {
-                    "message": "Super admin deleted all behavior logs.",
+
+                    "message": "Super admin soft-deleted all behavior logs.",
+
                     "deleted_at": now.isoformat(),
+
                 },
+
                 "created_at": now.isoformat(),
+
             }
+
         ).execute()
 
-        db.table("behavior_logs").delete().neq(
-            "id",
-            "00000000-0000-0000-0000-000000000000",
-        ).execute()
+        db.table("behavior_logs").update(
+
+            {
+
+                "is_deleted": True,
+
+                "deleted_by": req.super_admin_line_user_id,
+
+                "deleted_at": now.isoformat(),
+
+                "updated_by": req.super_admin_line_user_id,
+
+                "updated_at": now.isoformat(),
+
+            }
+
+        ).eq("is_deleted", False).execute()
 
         return {"status": "success"}
 
     except HTTPException as e:
+
         raise e
 
     except Exception as e:
+
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-
 # =========================================================
+
 # LINE WEBHOOK
+
 # =========================================================
 
 @app.post("/callback")
+
 async def callback(request: Request):
+
     if not handler:
+
         raise HTTPException(status_code=500, detail="LINE handler is not configured.")
 
     signature = request.headers.get("X-Line-Signature")
+
     body = await request.body()
 
     try:
+
         handler.handle(body.decode("utf-8"), signature)
 
     except InvalidSignatureError:
+
         raise HTTPException(status_code=400, detail="Invalid signature.")
 
     return "OK"
 
-
 if handler:
+
     @handler.add(MessageEvent, message=TextMessage)
+
     def handle_text_message(event):
+
         if event.source.type == "group":
+
             group_id = event.source.group_id
+
             user_id = getattr(event.source, "user_id", None)
+
             user_text = event.message.text.strip().lower()
 
             print(f"=== YOUR GROUP ID IS: {group_id} ===")
+
             print(f"=== USER ID IS: {user_id} ===")
 
             if user_text == "groupid" and line_bot_api:
+
                 line_bot_api.reply_message(
+
                     event.reply_token,
+
                     TextSendMessage(
+
                         text=f"Group ID คือ:\n{group_id}\n\nUser ID ของผู้ส่งคือ:\n{user_id or '-'}"
+
                     ),
+
                 )
 
             elif user_text == "userid" and line_bot_api:
+
                 line_bot_api.reply_message(
+
                     event.reply_token,
+
                     TextSendMessage(text=f"User ID ของคุณคือ:\n{user_id or '-'}"),
+
                 )
 
-
 # =========================================================
+
 # LIFF FRONTEND
+
 # =========================================================
 
 HTML_TEMPLATE = r'''
+
 <!DOCTYPE html>
+
 <html lang="th">
+
 <head>
+
     <meta charset="utf-8">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 
     <title>ระบบงานกิจการนักเรียน</title>
 
     <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+
     <script src="https://cdn.tailwindcss.com"></script>
+
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 
     <style>
+
         body {
+
             font-family: 'Kanit', sans-serif;
+
             background: #f0f9ff;
+
             padding-bottom: 96px;
+
         }
 
         .tab-content {
+
             display: none;
+
         }
 
         .tab-content.active {
+
             display: block;
+
             animation: fadeIn 0.25s;
+
         }
 
         @keyframes fadeIn {
+
             from { opacity: 0; transform: translateY(4px); }
+
             to { opacity: 1; transform: translateY(0); }
+
         }
 
         .bottom-menu {
+
             position: fixed;
+
             left: 0;
+
             right: 0;
+
             bottom: 0;
+
             z-index: 999;
+
             background: white;
+
             border-top: 1px solid #e5e7eb;
+
             box-shadow: 0 -4px 12px rgba(0,0,0,0.08);
+
             padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+
             overflow-x: auto;
+
             display: flex;
+
             gap: 6px;
+
         }
 
         .bottom-menu.hidden {
+
             display: none;
+
         }
 
         .bottom-menu::-webkit-scrollbar {
+
             display: none;
+
         }
 
         .bottom-menu {
+
             -ms-overflow-style: none;
+
             scrollbar-width: none;
+
         }
 
         .bottom-menu button {
+
             min-width: 72px;
+
             padding: 8px 6px;
+
             border-radius: 12px;
+
             font-size: 11px;
+
             font-weight: 700;
+
             color: #6b7280;
+
             background: #f9fafb;
+
             white-space: nowrap;
+
         }
 
         .bottom-menu button.active {
+
             color: #1d4ed8;
+
             background: #dbeafe;
+
         }
+
     </style>
+
 </head>
 
 <body>
 
     <div class="bg-blue-600 text-white p-5 shadow-md rounded-b-3xl mb-4">
+
         <h1 class="text-xl font-bold">
+
             <i class="fa-solid fa-user-shield"></i> ฝ่ายกิจการนักเรียน
+
         </h1>
+
         <p class="text-sm opacity-90">โรงเรียนหารเทารังสีประชาสรรค์</p>
+
         <p id="user_info" class="text-xs opacity-80 mt-2">กำลังเชื่อมต่อ LINE...</p>
+
     </div>
 
     <div class="px-4">
@@ -1306,400 +2525,717 @@ HTML_TEMPLATE = r'''
         <div id="role_menu_box" class="bottom-menu hidden"></div>
 
         <div id="view_landing" class="tab-content active">
+
             <div class="bg-white p-6 rounded-2xl shadow-sm text-center border-t-4 border-blue-500">
+
                 <div class="text-5xl text-blue-600 mb-4">
+
                     <i class="fa-solid fa-user-shield"></i>
+
                 </div>
 
                 <h2 class="text-xl font-bold text-gray-800 mb-2">
+
                     ระบบกิจการนักเรียน
+
                 </h2>
 
                 <p class="text-sm text-gray-500 mb-5">
+
                     กดปุ่มด้านล่างเพื่อเข้าสู่ระบบ ระบบจะตรวจสอบสิทธิ์จากบัญชี LINE โดยอัตโนมัติ
+
                 </p>
 
                 <button
+
                     onclick="enterSystem()"
+
                     class="w-full bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-xl font-bold shadow-lg text-lg"
+
                 >
+
                     <i class="fa-solid fa-right-to-bracket"></i>
+
                     เข้าสู่ระบบกิจการนักเรียน
+
                 </button>
+
             </div>
+
         </div>
 
         <div id="view_report" class="tab-content">
+
             <div class="bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded-xl mb-4 text-sm">
+
                 <b>หมายเหตุ:</b> ระบบจะบันทึกข้อมูลลงฐานข้อมูลเท่านั้น ไม่ส่งข้อความ LINE อัตโนมัติ
+
             </div>
 
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-t-4 border-blue-500">
+
                 <label class="font-bold text-gray-700 mb-2 block">
+
                     <i class="fa-solid fa-clipboard-list text-blue-500"></i> เลือกประเภทกิจกรรม
+
                 </label>
 
                 <select id="activity_type" class="w-full p-3 border rounded-xl bg-gray-50">
+
                     <option value="">-- กรุณาเลือก --</option>
+
                     <option value="กิจกรรมหน้าเสาธง">🇹🇭 กิจกรรมหน้าเสาธง</option>
+
                     <option value="โฮมรูม (Homeroom)">🏠 โฮมรูม (Homeroom)</option>
+
                     <option value="เช็คชื่อเข้าชั้นเรียน">📚 เช็คชื่อเข้าชั้นเรียน</option>
+
                     <option value="ตรวจเวร/จราจร">👮 ตรวจเวร/ความเรียบร้อย</option>
+
                     <option value="พฤติกรรมเชิงบวก">🌟 พฤติกรรมเชิงบวก</option>
+
                     <option value="พฤติกรรมทั่วไป">📝 พฤติกรรมทั่วไป</option>
+
                 </select>
+
             </div>
 
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4">
+
                 <label class="font-bold text-gray-700 mb-2 block">
+
                     <i class="fa-solid fa-magnifying-glass text-blue-500"></i> ค้นหานักเรียน
+
                 </label>
 
                 <input
+
                     type="text"
+
                     id="search_box"
+
                     onkeyup="searchStudent()"
+
                     placeholder="พิมพ์ชื่อ รหัสนักเรียน หรือห้องเรียน..."
+
                     class="w-full p-3 border rounded-xl bg-gray-50 mb-2"
+
                 >
 
                 <div id="search_results" class="hidden border rounded-xl bg-white shadow-sm max-h-48 overflow-y-auto mb-3"></div>
 
                 <div id="selected_student_form" class="hidden mt-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+
                     <div id="selected_name" class="font-bold text-lg text-blue-800 mb-3"></div>
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">หมวดหมู่พฤติกรรม</label>
 
                     <select
+
                         id="offense_type"
+
                         onchange="handleOffenseChange()"
+
                         class="w-full p-3 border rounded-xl bg-white mb-3"
+
                     >
+
                         <option value="">-- เลือกพฤติกรรม --</option>
+
                     </select>
 
                     <div id="behavior_type_notice" class="hidden text-sm p-2 rounded-lg mb-3"></div>
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">
+
                         คะแนน
+
                     </label>
 
                     <p class="text-xs text-gray-500 mb-1">
+
                         ใส่เป็นตัวเลขบวก เช่น 5, 10, 20 ระบบจะบวกหรือหักให้อัตโนมัติตามประเภทพฤติกรรม
+
                     </p>
 
                     <input
+
                         type="number"
+
                         id="deduct_score"
+
                         placeholder="คะแนน เช่น 5"
+
                         class="w-full p-3 border rounded-xl bg-white mb-3 transition"
+
                     >
 
                     <input
+
                         type="text"
+
                         id="reason"
+
                         placeholder="หมายเหตุเพิ่มเติม ถ้ามี"
+
                         class="w-full p-3 border rounded-xl bg-white mb-3"
+
                     >
 
                     <button
+
                         type="button"
+
                         onclick="addToList()"
+
                         class="w-full bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-xl font-bold transition shadow-sm"
+
                     >
+
                         <i class="fa-solid fa-plus"></i> เพิ่มลงรายการเตรียมบันทึก
+
                     </button>
+
                 </div>
+
             </div>
 
             <h3 class="font-bold text-gray-700 mb-2">
+
                 รายการที่เตรียมบันทึก (<span id="draft_count">0</span> คน)
+
             </h3>
 
             <div id="draft_list" class="space-y-2 mb-6"></div>
 
             <button
+
                 onclick="submitReport()"
+
                 class="w-full bg-green-500 text-white p-4 rounded-xl font-bold shadow-lg"
+
             >
+
                 <i class="fa-solid fa-database"></i> บันทึกข้อมูลเข้าระบบ
+
             </button>
+
+        </div>
+
+        <div id="view_student_score" class="tab-content">
+
+            <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-blue-500">
+
+                <h2 class="font-bold text-gray-700 mb-3">
+
+                    <i class="fa-solid fa-magnifying-glass-chart text-blue-500"></i> ค้นหาคะแนนนักเรียน
+
+                </h2>
+
+                <p class="text-xs text-gray-500 mb-3">
+
+                    ผู้ใช้งานทุกระดับสามารถค้นหานักเรียน และดูคะแนนปัจจุบันพร้อมประวัติการเพิ่ม/หักคะแนนได้
+
+                </p>
+
+                <input
+
+                    type="text"
+
+                    id="score_search_box"
+
+                    onkeyup="searchStudentForScore()"
+
+                    placeholder="พิมพ์ชื่อ รหัสนักเรียน หรือห้องเรียน..."
+
+                    class="w-full p-3 border rounded-xl bg-gray-50 mb-2"
+
+                >
+
+                <div id="score_search_results" class="hidden border rounded-xl bg-white shadow-sm max-h-48 overflow-y-auto mb-3"></div>
+
+                <div id="student_score_box"></div>
+
+            </div>
+
         </div>
 
         <div id="view_add" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-green-500">
+
                 <h2 class="font-bold text-gray-700 mb-3">
+
                     <i class="fa-solid fa-user-plus text-green-500"></i> เพิ่มนักเรียนตกหล่น
+
                 </h2>
 
                 <label class="block text-sm font-bold text-gray-700 mb-1">รหัสนักเรียน</label>
+
                 <input type="text" id="new_id" placeholder="เช่น 22111" class="w-full p-3 border rounded-xl bg-gray-50 mb-3">
 
                 <label class="block text-sm font-bold text-gray-700 mb-1">ชื่อ-นามสกุล</label>
+
                 <input type="text" id="new_name" placeholder="เช่น ด.ช. สมชาย ใจดี" class="w-full p-3 border rounded-xl bg-gray-50 mb-3">
 
                 <label class="block text-sm font-bold text-gray-700 mb-1">ชั้นเรียน</label>
+
                 <input type="text" id="new_room" placeholder="เช่น ม.1/1" class="w-full p-3 border rounded-xl bg-gray-50 mb-4">
 
                 <button onclick="confirmAddStudent()" class="w-full bg-green-600 text-white p-3 rounded-xl font-bold shadow-sm">
+
                     บันทึกข้อมูลนักเรียน
+
                 </button>
+
             </div>
+
         </div>
 
         <div id="view_manage_users" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-purple-500">
+
                 <h2 class="font-bold text-gray-700 mb-3">
+
                     <i class="fa-solid fa-user-gear text-purple-500"></i> จัดการสิทธิ์ผู้ใช้
+
                 </h2>
 
                 <p class="text-xs text-gray-500 mb-4">
+
                     ลำดับสิทธิ์: super_admin > admin > teacher > viewer > inactive
+
                 </p>
 
                 <button onclick="loadUsers()" class="w-full bg-purple-600 text-white p-3 rounded-xl font-bold mb-4">
+
                     โหลดรายชื่อผู้ใช้
+
                 </button>
 
                 <div id="users_list" class="space-y-2"></div>
+
             </div>
+
         </div>
 
         <div id="view_daily_report" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-sky-500">
+
                 <h2 class="font-bold text-gray-700 mb-3">
+
                     <i class="fa-solid fa-calendar-day text-sky-500"></i> รายงานวันนี้
+
                 </h2>
+
                 <button onclick="loadPeriodReport('daily', 'daily_report_box')" class="w-full bg-sky-600 text-white p-3 rounded-xl font-bold mb-2">
+
                     โหลดรายงานวันนี้
+
                 </button>
+
                 <button onclick="sendPeriodReportToLine('daily')" class="w-full bg-green-600 text-white p-3 rounded-xl font-bold mb-4">
+
                     ส่งรายงานวันนี้เข้ากลุ่ม LINE
+
                 </button>
+
                 <div id="daily_report_box"></div>
+
             </div>
+
         </div>
 
         <div id="view_weekly_report" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-indigo-500">
+
                 <h2 class="font-bold text-gray-700 mb-3">
+
                     <i class="fa-solid fa-calendar-week text-indigo-500"></i> รายงานสัปดาห์นี้
+
                 </h2>
+
                 <button onclick="loadPeriodReport('weekly', 'weekly_report_box')" class="w-full bg-indigo-600 text-white p-3 rounded-xl font-bold mb-2">
+
                     โหลดรายงานสัปดาห์นี้
+
                 </button>
+
                 <button onclick="sendPeriodReportToLine('weekly')" class="w-full bg-green-600 text-white p-3 rounded-xl font-bold mb-4">
+
                     ส่งรายงานสัปดาห์นี้เข้ากลุ่ม LINE
+
                 </button>
+
                 <div id="weekly_report_box"></div>
+
             </div>
+
         </div>
 
         <div id="view_monthly_report" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-teal-500">
+
                 <h2 class="font-bold text-gray-700 mb-3">
+
                     <i class="fa-solid fa-calendar-days text-teal-500"></i> รายงานเดือนนี้
+
                 </h2>
+
                 <button onclick="loadPeriodReport('monthly', 'monthly_report_box')" class="w-full bg-teal-600 text-white p-3 rounded-xl font-bold mb-2">
+
                     โหลดรายงานเดือนนี้
+
                 </button>
+
                 <button onclick="sendPeriodReportToLine('monthly')" class="w-full bg-green-600 text-white p-3 rounded-xl font-bold mb-4">
+
                     ส่งรายงานเดือนนี้เข้ากลุ่ม LINE
+
                 </button>
+
                 <div id="monthly_report_box"></div>
+
             </div>
+
         </div>
 
         <div id="view_report_summary" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-orange-500">
+
                 <h2 class="font-bold text-gray-700 mb-3">
+
                     <i class="fa-solid fa-list text-orange-500"></i> รายการแจ้งล่าสุด
+
                 </h2>
 
+                <p class="text-xs text-gray-500 mb-3">
+
+                    Admin และ Super Admin สามารถแก้ไขหรือลบเฉพาะรายการได้
+
+                </p>
+
                 <button onclick="loadReportSummary()" class="w-full bg-orange-500 text-white p-3 rounded-xl font-bold mb-4">
+
                     โหลดรายการล่าสุด
+
                 </button>
 
                 <div id="summary_list" class="space-y-2"></div>
+
             </div>
+
         </div>
 
-        <div id="view_system_settings" class="tab-content">
+        <div id="view_audit_logs" class="tab-content">
+
             <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-gray-700">
-                <h2 class="font-bold text-gray-800 mb-1">
-                    <i class="fa-solid fa-gear text-gray-700"></i> ตั้งค่าระบบ
+
+                <h2 class="font-bold text-gray-800 mb-3">
+
+                    <i class="fa-solid fa-clock-rotate-left text-gray-700"></i> Logs การใช้งานระบบ
+
                 </h2>
 
                 <p class="text-xs text-red-500 mb-4">
+
+                    เฉพาะ Super Admin เท่านั้น
+
+                </p>
+
+                <button onclick="loadAuditLogs()" class="w-full bg-gray-800 text-white p-3 rounded-xl font-bold mb-4">
+
+                    โหลด Logs
+
+                </button>
+
+                <div id="audit_logs_box" class="space-y-2"></div>
+
+            </div>
+
+        </div>
+
+        <div id="view_system_settings" class="tab-content">
+
+            <div class="bg-white p-4 rounded-xl shadow-sm mb-4 border-l-4 border-gray-700">
+
+                <h2 class="font-bold text-gray-800 mb-1">
+
+                    <i class="fa-solid fa-gear text-gray-700"></i> ตั้งค่าระบบ
+
+                </h2>
+
+                <p class="text-xs text-red-500 mb-4">
+
                     เฉพาะ Super Admin เท่านั้นที่สามารถแก้ไขค่าระบบและหมวดหมู่พฤติกรรมได้
+
                 </p>
 
                 <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4">
+
                     <h3 class="font-bold text-blue-800 mb-2">
+
                         1. ข้อมูลปีการศึกษาและภาคเรียน
+
                     </h3>
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">ปีการศึกษา</label>
+
                     <input type="number" id="setting_academic_year" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">ภาคเรียน</label>
+
                     <select id="setting_semester" class="w-full p-3 border rounded-xl bg-white mb-3">
+
                         <option value="1">ภาคเรียนที่ 1</option>
+
                         <option value="2">ภาคเรียนที่ 2</option>
+
                         <option value="3">ภาคเรียนฤดูร้อน / อื่น ๆ</option>
+
                     </select>
+
                 </div>
 
                 <div class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 mb-4">
+
                     <h3 class="font-bold text-yellow-800 mb-2">
+
                         2. คะแนนและเกณฑ์ความเสี่ยง
+
                     </h3>
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">คะแนนตั้งต้นของนักเรียน</label>
+
                     <input type="number" id="setting_base_score" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">เกณฑ์เฝ้าระวัง</label>
+
                     <input type="number" id="setting_warning_threshold" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">เกณฑ์เสี่ยง</label>
+
                     <input type="number" id="setting_risk_threshold" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">จำนวนครั้งความผิดซ้ำ</label>
+
                     <input type="number" id="setting_repeat_offense_threshold" class="w-full p-3 border rounded-xl bg-white mb-4">
+
                 </div>
 
                 <button onclick="saveSystemSettings()" class="w-full bg-gray-800 text-white p-3 rounded-xl font-bold shadow-sm mb-4">
+
                     บันทึกการตั้งค่าระบบ
+
                 </button>
 
                 <div class="bg-green-50 border border-green-200 rounded-xl p-3 mb-4">
+
                     <h3 class="font-bold text-green-800 mb-2">
+
                         3. เพิ่ม/จัดการหมวดหมู่พฤติกรรม
+
                     </h3>
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">ชื่อพฤติกรรม</label>
+
                     <input type="text" id="rule_name" placeholder="เช่น ช่วยเหลืองานครู / มาสาย" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">ประเภทพฤติกรรม</label>
+
                     <select id="rule_behavior_type" class="w-full p-3 border rounded-xl bg-white mb-3">
+
                         <option value="positive">พฤติกรรมด้านบวก เพิ่มคะแนน</option>
+
                         <option value="negative">พฤติกรรมด้านลบ หักคะแนน</option>
+
                     </select>
 
                     <label class="block text-sm font-bold text-gray-700 mb-1">คะแนนตั้งต้น</label>
+
                     <p class="text-xs text-gray-500 mb-1">ใส่เป็นตัวเลขบวกเสมอ เช่น 5, 10, 20</p>
+
                     <input type="number" id="rule_default_points" placeholder="เช่น 5" class="w-full p-3 border rounded-xl bg-white mb-3">
 
                     <label class="flex items-center gap-2 text-sm mb-3">
+
                         <input type="checkbox" id="rule_require_manual_score">
+
                         <span>ให้ผู้ใช้ระบุคะแนนเองทุกครั้ง</span>
+
                     </label>
 
                     <label class="flex items-center gap-2 text-sm mb-4">
+
                         <input type="checkbox" id="rule_is_active" checked>
+
                         <span>เปิดใช้งานหมวดหมู่นี้</span>
+
                     </label>
 
                     <button onclick="addOffenseRule()" class="w-full bg-green-600 text-white p-3 rounded-xl font-bold mb-3">
+
                         เพิ่มหมวดหมู่พฤติกรรม
+
                     </button>
 
                     <button onclick="loadOffenseRules()" class="w-full bg-blue-600 text-white p-3 rounded-xl font-bold mb-4">
+
                         โหลดรายการหมวดหมู่พฤติกรรม
+
                     </button>
 
                     <div id="rules_list" class="space-y-2"></div>
+
                 </div>
 
                 <div class="bg-red-50 border border-red-200 rounded-xl p-3 mt-6">
+
                     <h3 class="font-bold text-red-700 mb-2">
+
                         4. ลบประวัติการแจ้งพฤติกรรมทั้งหมด
+
                     </h3>
 
                     <p class="text-xs text-red-600 mb-3">
-                        คำสั่งนี้จะลบข้อมูลในประวัติการแจ้งพฤติกรรมทั้งหมดออกจากระบบ
+
+                        คำสั่งนี้จะซ่อนข้อมูลประวัติการแจ้งพฤติกรรมทั้งหมดออกจากรายงาน แต่ยังมีร่องรอยใน Logs
+
                     </p>
 
                     <button onclick="clearAllBehaviorLogs()" class="w-full bg-red-600 text-white p-3 rounded-xl font-bold shadow-sm">
+
                         ลบประวัติการแจ้งทั้งหมด
+
                     </button>
+
                 </div>
+
             </div>
+
         </div>
 
     </div>
 
 <script>
+
     const LIFF_ID = "__LIFF_ID__";
 
     let USER_ID = "";
+
     let CURRENT_ROLE = "teacher";
+
     let CURRENT_USER = null;
+
     let SYSTEM_SETTINGS = null;
 
     let offenseRules = [];
+
     let currentSelectedStudent = null;
+
     let draftList = [];
+
     let searchTimeout = null;
 
+    let scoreSearchTimeout = null;
+
     async function main() {
+
         try {
+
             await liff.init({ liffId: LIFF_ID });
 
             if (!liff.isLoggedIn()) {
+
                 liff.login();
+
                 return;
+
             }
 
             const profile = await liff.getProfile();
+
             USER_ID = profile.userId;
 
             document.getElementById("user_info").innerText =
+
                 `LINE: ${profile.displayName || "-"}`;
 
             renderDraftList();
 
         } catch (e) {
+
             console.error(e);
+
             Swal.fire("Error", "ไม่สามารถเชื่อมต่อ LINE LIFF ได้", "error");
+
         }
+
     }
 
     async function enterSystem() {
+
         try {
+
             Swal.fire({
+
                 title: "กำลังตรวจสอบสิทธิ์...",
+
                 allowOutsideClick: false,
+
                 didOpen: () => {
+
                     Swal.showLoading();
+
                 }
+
             });
 
             const profile = await liff.getProfile();
+
             USER_ID = profile.userId;
 
             const authRes = await fetch("/api/auth/check", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     line_user_id: profile.userId,
+
                     display_name: profile.displayName
+
                 })
+
             });
 
             const authData = await authRes.json();
 
             if (authData.status === "error") {
+
                 throw new Error(authData.error);
+
             }
 
             CURRENT_USER = authData.user;
+
             CURRENT_ROLE = authData.user.role;
+
             SYSTEM_SETTINGS = authData.settings || null;
 
             document.getElementById("user_info").innerText =
+
                 `ผู้ใช้: ${CURRENT_USER.display_name || "-"} | สิทธิ์: ${CURRENT_ROLE}`;
 
             renderMenusByRole(authData.menus);
@@ -1711,231 +3247,369 @@ HTML_TEMPLATE = r'''
             Swal.close();
 
             if (CURRENT_ROLE === "viewer") {
-                switchTab("daily_report");
+
+                switchTab("student_score");
+
             } else {
+
                 switchTab("report");
+
             }
 
         } catch (e) {
+
             console.error(e);
+
             Swal.fire("ข้อผิดพลาด", e.message || "ไม่สามารถตรวจสอบสิทธิ์ได้", "error");
+
         }
+
     }
 
     async function loadInitData() {
+
         const res = await fetch("/api/init");
+
         const data = await res.json();
 
         if (data.status === "error") {
+
             throw new Error(data.error);
+
         }
 
         offenseRules = data.rules || [];
+
         SYSTEM_SETTINGS = data.settings || SYSTEM_SETTINGS;
 
         const select = document.getElementById("offense_type");
+
         select.innerHTML = '<option value="">-- เลือกพฤติกรรม --</option>';
 
         const positiveGroup = document.createElement("optgroup");
+
         positiveGroup.label = "พฤติกรรมด้านบวก เพิ่มคะแนน";
 
         const negativeGroup = document.createElement("optgroup");
+
         negativeGroup.label = "พฤติกรรมด้านลบ หักคะแนน";
 
         offenseRules.forEach(rule => {
+
             const opt = document.createElement("option");
 
             const behaviorType = rule.behavior_type || "negative";
+
             const signText = behaviorType === "positive" ? "+" : "-";
+
             const labelType = behaviorType === "positive" ? "เพิ่ม" : "หัก";
 
             opt.value = [
+
                 rule.rule_name,
+
                 rule.default_points !== null ? rule.default_points : 0,
+
                 rule.require_manual_score,
+
                 behaviorType
+
             ].join("|");
 
             opt.innerText = `${rule.rule_name} (${labelType} ${signText}${rule.default_points})`;
 
             if (behaviorType === "positive") {
+
                 positiveGroup.appendChild(opt);
+
             } else {
+
                 negativeGroup.appendChild(opt);
+
             }
+
         });
 
         select.appendChild(positiveGroup);
+
         select.appendChild(negativeGroup);
+
     }
 
     function renderMenusByRole(menus) {
+
         const navBox = document.getElementById("role_menu_box");
 
         navBox.innerHTML = menus.map(menu => `
+
             <button onclick="switchTab('${menu.id}')" id="nav_${menu.id}">
+
                 <i class="fa-solid ${menu.icon}"></i><br>${menu.label}
+
             </button>
+
         `).join("");
+
     }
 
     function switchTab(tab) {
+
         const views = document.querySelectorAll(".tab-content");
 
         views.forEach(v => {
+
             v.classList.remove("active");
+
         });
 
         const navs = document.querySelectorAll("#role_menu_box button");
 
         navs.forEach(n => {
+
             n.classList.remove("active");
+
         });
 
         const targetView = document.getElementById(`view_${tab}`);
+
         const targetNav = document.getElementById(`nav_${tab}`);
 
         if (targetView) {
+
             targetView.classList.add("active");
+
         }
 
         if (targetNav) {
+
             targetNav.classList.add("active");
+
         }
 
         if (tab === "system_settings") {
+
             fillSystemSettingsForm();
+
             loadOffenseRules();
+
         }
+
+        if (tab === "audit_logs") {
+
+            loadAuditLogs();
+
+        }
+
     }
 
     function handleOffenseChange() {
+
         const select = document.getElementById("offense_type");
+
         const scoreInput = document.getElementById("deduct_score");
+
         const notice = document.getElementById("behavior_type_notice");
 
         if (!select.value) {
+
             scoreInput.value = "";
+
             scoreInput.classList.remove("border-red-500", "bg-red-50", "border-green-500", "bg-green-50");
+
             notice.classList.add("hidden");
+
             return;
+
         }
 
         const parts = select.value.split("|");
+
         const defaultScore = Math.abs(parseInt(parts[1] || "0"));
+
         const requireManual = parts[2] === "true";
+
         const behaviorType = parts[3] || "negative";
 
         if (requireManual) {
+
             scoreInput.value = "";
+
             scoreInput.placeholder = "กรุณาระบุคะแนนเป็นตัวเลขบวก";
+
         } else {
+
             scoreInput.value = defaultScore;
+
         }
 
         if (behaviorType === "positive") {
+
             scoreInput.classList.remove("border-red-500", "bg-red-50");
+
             scoreInput.classList.add("border-green-500", "bg-green-50");
+
             notice.className = "text-sm p-2 rounded-lg mb-3 bg-green-100 text-green-700";
+
             notice.innerText = "พฤติกรรมด้านบวก: ระบบจะเพิ่มคะแนนให้นักเรียน";
+
         } else {
+
             scoreInput.classList.remove("border-green-500", "bg-green-50");
+
             scoreInput.classList.add("border-red-500", "bg-red-50");
+
             notice.className = "text-sm p-2 rounded-lg mb-3 bg-red-100 text-red-700";
+
             notice.innerText = "พฤติกรรมด้านลบ: ระบบจะหักคะแนนนักเรียน";
+
         }
+
     }
 
     async function searchStudent() {
+
         clearTimeout(searchTimeout);
 
         const query = document.getElementById("search_box").value.trim();
+
         const resultsBox = document.getElementById("search_results");
 
         if (query.length < 2) {
+
             resultsBox.classList.add("hidden");
+
             return;
+
         }
 
         searchTimeout = setTimeout(async () => {
+
             try {
+
                 const res = await fetch(`/api/students/search?q=${encodeURIComponent(query)}`);
+
                 const data = await res.json();
 
                 if (!data.results || data.results.length === 0) {
+
                     resultsBox.innerHTML = `
+
                         <div class="p-3 text-sm text-gray-400">
+
                             ไม่พบข้อมูลนักเรียน
+
                         </div>
+
                     `;
+
                     resultsBox.classList.remove("hidden");
+
                     return;
+
                 }
 
                 resultsBox.innerHTML = data.results.map((s, idx) => `
+
                     <div
+
                         onclick="selectStudentByIndex(${idx})"
+
                         class="p-3 border-b hover:bg-blue-50 cursor-pointer"
+
                     >
+
                         <span class="font-bold text-gray-800">${escapeHtml(s.student_id)}</span>
+
                         - ${escapeHtml(s.name)}
+
                         <span class="text-sm text-gray-500">(${escapeHtml(s.room)})</span>
+
                     </div>
+
                 `).join("");
 
                 window.latestStudentSearchResults = data.results;
+
                 resultsBox.classList.remove("hidden");
 
             } catch (e) {
+
                 console.error(e);
+
             }
+
         }, 300);
+
     }
 
     function selectStudentByIndex(index) {
+
         const s = window.latestStudentSearchResults[index];
 
         if (!s) {
+
             return;
+
         }
 
         selectStudent(s.student_id, s.name, s.room);
+
     }
 
     function selectStudent(id, name, room) {
+
         currentSelectedStudent = {
+
             student_id: id,
+
             student_name: name,
+
             room: room
+
         };
 
         document.getElementById("search_box").value = "";
+
         document.getElementById("search_results").classList.add("hidden");
+
         document.getElementById("selected_name").innerText = `${name} (${room})`;
+
         document.getElementById("selected_student_form").classList.remove("hidden");
+
     }
 
     function addToList() {
+
         const select = document.getElementById("offense_type");
+
         const scoreInput = document.getElementById("deduct_score");
+
         const reasonInput = document.getElementById("reason");
 
         if (!currentSelectedStudent) {
+
             return Swal.fire("แจ้งเตือน", "กรุณาเลือกนักเรียนก่อน", "warning");
+
         }
 
         if (!select.value) {
+
             return Swal.fire("แจ้งเตือน", "กรุณาเลือกพฤติกรรม", "warning");
+
         }
 
         const parts = select.value.split("|");
+
         const offenseName = parts[0];
-        const requireManual = parts[2] === "true";
+
         const behaviorType = parts[3] || "negative";
+
         let points = parseInt(scoreInput.value);
 
         if (isNaN(points) || points <= 0) {
+
             return Swal.fire("แจ้งเตือน", "กรุณาระบุคะแนนเป็นตัวเลขบวก เช่น 5 หรือ 10", "warning");
+
         }
 
         points = Math.abs(points);
@@ -1943,11 +3617,17 @@ HTML_TEMPLATE = r'''
         const finalPoints = behaviorType === "positive" ? points : -points;
 
         draftList.push({
+
             ...currentSelectedStudent,
+
             offense_name: offenseName,
+
             points_deducted: finalPoints,
+
             reason: reasonInput.value,
+
             behavior_type: behaviorType
+
         });
 
         currentSelectedStudent = null;
@@ -1955,914 +3635,2099 @@ HTML_TEMPLATE = r'''
         document.getElementById("selected_student_form").classList.add("hidden");
 
         select.value = "";
+
         scoreInput.value = "";
+
         reasonInput.value = "";
+
         document.getElementById("behavior_type_notice").classList.add("hidden");
+
         scoreInput.classList.remove("border-red-500", "bg-red-50", "border-green-500", "bg-green-50");
 
         renderDraftList();
+
     }
 
     function renderDraftList() {
+
         document.getElementById("draft_count").innerText = draftList.length;
 
         const box = document.getElementById("draft_list");
 
         if (draftList.length === 0) {
+
             box.innerHTML = `
+
                 <div class="text-gray-400 text-center p-5 bg-white rounded-xl border border-dashed">
+
                     ยังไม่ได้เลือกนักเรียน
+
                 </div>
+
             `;
+
             return;
+
         }
 
         box.innerHTML = draftList.map((item, index) => {
+
             const isPositive = item.points_deducted > 0;
+
             const scoreClass = isPositive ? "text-green-600" : "text-red-600";
+
             const badge = isPositive ? "เพิ่มคะแนน" : "หักคะแนน";
+
             const sign = item.points_deducted > 0 ? "+" : "";
 
             return `
+
                 <div class="bg-white p-3 border rounded-xl flex justify-between items-center shadow-sm">
+
                     <div>
+
                         <div class="font-bold text-gray-800">
+
                             ${escapeHtml(item.student_name)}
+
                             <span class="text-xs text-gray-500">(${escapeHtml(item.room)})</span>
+
                         </div>
 
                         <div class="text-sm ${scoreClass}">
+
                             ${escapeHtml(item.offense_name)} | ${badge} ${sign}${item.points_deducted}
+
                             ${item.reason ? `- ${escapeHtml(item.reason)}` : ""}
+
                         </div>
+
                     </div>
 
                     <button onclick="removeFromList(${index})" class="text-red-400 hover:text-red-600 bg-red-50 p-2 rounded-lg">
+
                         <i class="fa-solid fa-trash"></i>
+
                     </button>
+
                 </div>
+
             `;
+
         }).join("");
+
     }
 
     function removeFromList(index) {
+
         draftList.splice(index, 1);
+
         renderDraftList();
+
     }
 
     async function submitReport() {
+
         const activityType = document.getElementById("activity_type").value;
 
         if (!activityType) {
+
             return Swal.fire("แจ้งเตือน", "กรุณาเลือกประเภทกิจกรรมก่อน", "warning");
+
         }
 
         if (draftList.length === 0) {
+
             return Swal.fire("แจ้งเตือน", "กรุณาเพิ่มนักเรียนอย่างน้อย 1 คน", "warning");
+
         }
 
         Swal.fire({
+
             title: "กำลังบันทึกข้อมูล...",
+
             text: "ระบบจะบันทึกข้อมูลเท่านั้น ยังไม่ส่งข้อความเข้า LINE",
+
             allowOutsideClick: false,
+
             didOpen: () => {
+
                 Swal.showLoading();
+
             }
+
         });
 
         try {
+
             const res = await fetch("/api/report-behavior", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     teacher_id: USER_ID,
+
                     activity_type: activityType,
+
                     records: draftList
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire(
+
                 "สำเร็จ",
+
                 "บันทึกข้อมูลเข้าระบบเรียบร้อยแล้ว โดยยังไม่ส่งข้อความเข้ากลุ่ม LINE",
+
                 "success"
+
             );
 
             draftList = [];
+
             document.getElementById("activity_type").value = "";
 
             renderDraftList();
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
+    }
+
+    async function searchStudentForScore() {
+
+        clearTimeout(scoreSearchTimeout);
+
+        const query = document.getElementById("score_search_box").value.trim();
+
+        const resultsBox = document.getElementById("score_search_results");
+
+        if (query.length < 2) {
+
+            resultsBox.classList.add("hidden");
+
+            return;
+
+        }
+
+        scoreSearchTimeout = setTimeout(async () => {
+
+            try {
+
+                const res = await fetch(`/api/students/search?q=${encodeURIComponent(query)}`);
+
+                const data = await res.json();
+
+                if (!data.results || data.results.length === 0) {
+
+                    resultsBox.innerHTML = `
+
+                        <div class="p-3 text-sm text-gray-400">
+
+                            ไม่พบข้อมูลนักเรียน
+
+                        </div>
+
+                    `;
+
+                    resultsBox.classList.remove("hidden");
+
+                    return;
+
+                }
+
+                resultsBox.innerHTML = data.results.map((s, idx) => `
+
+                    <div
+
+                        onclick="selectStudentForScore(${idx})"
+
+                        class="p-3 border-b hover:bg-blue-50 cursor-pointer"
+
+                    >
+
+                        <span class="font-bold text-gray-800">${escapeHtml(s.student_id)}</span>
+
+                        - ${escapeHtml(s.name)}
+
+                        <span class="text-sm text-gray-500">(${escapeHtml(s.room)})</span>
+
+                    </div>
+
+                `).join("");
+
+                window.latestScoreStudentSearchResults = data.results;
+
+                resultsBox.classList.remove("hidden");
+
+            } catch (e) {
+
+                console.error(e);
+
+            }
+
+        }, 300);
+
+    }
+
+    async function selectStudentForScore(index) {
+
+        const s = window.latestScoreStudentSearchResults[index];
+
+        if (!s) {
+
+            return;
+
+        }
+
+        document.getElementById("score_search_box").value = "";
+
+        document.getElementById("score_search_results").classList.add("hidden");
+
+        await loadStudentScore(s.student_id, s.name, s.room);
+
+    }
+
+    async function loadStudentScore(studentId, studentName, room) {
+
+        const box = document.getElementById("student_score_box");
+
+        box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลดคะแนน...</div>`;
+
+        try {
+
+            const res = await fetch("/api/students/score", {
+
+                method: "POST",
+
+                headers: {
+
+                    "Content-Type": "application/json"
+
+                },
+
+                body: JSON.stringify({
+
+                    line_user_id: USER_ID,
+
+                    student_id: studentId,
+
+                    student_name: studentName,
+
+                    room: room
+
+                })
+
+            });
+
+            const data = await res.json();
+
+            if (data.status === "error") {
+
+                throw new Error(data.error);
+
+            }
+
+            const scoreClass = data.current_score >= 80
+
+                ? "text-green-600"
+
+                : data.current_score >= 60
+
+                    ? "text-yellow-600"
+
+                    : "text-red-600";
+
+            box.innerHTML = `
+
+                <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4">
+
+                    <div class="font-bold text-lg text-gray-800">
+
+                        ${escapeHtml(data.student.student_name)}
+
+                    </div>
+
+                    <div class="text-sm text-gray-500 mb-3">
+
+                        รหัส ${escapeHtml(data.student.student_id)} | ห้อง ${escapeHtml(data.student.room)}
+
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2">
+
+                        <div class="bg-white border rounded-xl p-3 text-center">
+
+                            <div class="text-xs text-gray-500">คะแนนตั้งต้น</div>
+
+                            <div class="text-xl font-bold text-gray-700">${data.base_score}</div>
+
+                        </div>
+
+                        <div class="bg-white border rounded-xl p-3 text-center">
+
+                            <div class="text-xs text-gray-500">คะแนนปัจจุบัน</div>
+
+                            <div class="text-xl font-bold ${scoreClass}">${data.current_score}</div>
+
+                        </div>
+
+                        <div class="bg-white border rounded-xl p-3 text-center">
+
+                            <div class="text-xs text-gray-500">คะแนนเพิ่มรวม</div>
+
+                            <div class="text-xl font-bold text-green-600">+${data.total_positive}</div>
+
+                        </div>
+
+                        <div class="bg-white border rounded-xl p-3 text-center">
+
+                            <div class="text-xs text-gray-500">คะแนนหักรวม</div>
+
+                            <div class="text-xl font-bold text-red-600">${data.total_negative}</div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <div class="bg-white border rounded-xl p-3">
+
+                    <div class="font-bold text-gray-700 mb-2">
+
+                        ประวัติพฤติกรรมทั้งหมด
+
+                    </div>
+
+                    ${(data.logs || []).length === 0 ? `
+
+                        <div class="text-gray-400 text-sm">ยังไม่มีประวัติพฤติกรรม</div>
+
+                    ` : data.logs.map(log => `
+
+                        <div class="border-b py-2">
+
+                            <div class="font-bold text-gray-800">
+
+                                ${escapeHtml(log.offense_name || "-")}
+
+                            </div>
+
+                            <div class="${(log.points_deducted || 0) >= 0 ? 'text-green-600' : 'text-red-600'} text-sm">
+
+                                คะแนน: ${(log.points_deducted || 0) >= 0 ? "+" : ""}${log.points_deducted || 0}
+
+                            </div>
+
+                            <div class="text-xs text-gray-500">
+
+                                กิจกรรม: ${escapeHtml(log.activity_type || "-")}
+
+                            </div>
+
+                            <div class="text-xs text-gray-500">
+
+                                หมายเหตุ: ${escapeHtml(log.reason || "-")}
+
+                            </div>
+
+                            <div class="text-xs text-gray-400">
+
+                                ${escapeHtml(log.created_at || "")}
+
+                            </div>
+
+                        </div>
+
+                    `).join("")}
+
+                </div>
+
+            `;
+
+        } catch (e) {
+
+            box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+
+        }
+
     }
 
     async function confirmAddStudent() {
+
         const student_id = document.getElementById("new_id").value.trim();
+
         const name = document.getElementById("new_name").value.trim();
+
         const room = document.getElementById("new_room").value.trim();
 
         if (!student_id || !name || !room) {
+
             return Swal.fire("แจ้งเตือน", "กรุณากรอกให้ครบทุกช่อง", "warning");
+
         }
 
         const result = await Swal.fire({
+
             title: "ยืนยันเพิ่มข้อมูล?",
+
             html: `ชื่อ: <b>${escapeHtml(name)}</b><br>ห้อง: ${escapeHtml(room)}<br>รหัส: ${escapeHtml(student_id)}`,
+
             icon: "question",
+
             showCancelButton: true,
+
             confirmButtonText: "ยืนยัน บันทึกเลย",
+
             cancelButtonText: "ยกเลิก",
+
             confirmButtonColor: "#16a34a"
+
         });
 
         if (!result.isConfirmed) {
+
             return;
+
         }
 
         try {
+
             const response = await fetch("/api/students/add", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     student_id,
+
                     name,
+
                     room
+
                 })
+
             });
 
             const data = await response.json();
 
             if (data.status === "success") {
+
                 Swal.fire("สำเร็จ", "เพิ่มรายชื่อนักเรียนเรียบร้อยแล้ว", "success");
 
                 document.getElementById("new_id").value = "";
+
                 document.getElementById("new_name").value = "";
+
                 document.getElementById("new_room").value = "";
 
             } else {
+
                 Swal.fire("เกิดข้อผิดพลาด", data.error, "error");
+
             }
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้", "error");
+
         }
+
     }
 
     async function loadUsers() {
+
         if (!["super_admin", "admin"].includes(CURRENT_ROLE)) {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับแอดมินเท่านั้น", "error");
+
         }
 
         const box = document.getElementById("users_list");
+
         box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลด...</div>`;
 
         try {
+
             const res = await fetch(`/api/admin/users?admin_line_user_id=${encodeURIComponent(USER_ID)}`);
+
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             if (!data.users || data.users.length === 0) {
+
                 box.innerHTML = `<div class="text-gray-400 p-3">ยังไม่มีผู้ใช้</div>`;
+
                 return;
+
             }
 
             box.innerHTML = data.users.map(user => `
+
                 <div class="bg-gray-50 border rounded-xl p-3">
+
                     <div class="font-bold text-gray-800">
+
                         ${escapeHtml(user.display_name || "ไม่ระบุชื่อ")}
+
                     </div>
 
                     <div class="text-xs text-gray-500 break-all mb-2">
+
                         ${escapeHtml(user.line_user_id)}
+
                     </div>
 
                     <div class="text-xs mb-2 ${user.is_active ? 'text-green-600' : 'text-red-600'}">
+
                         สถานะ: ${user.is_active ? 'ใช้งานได้' : 'ถูกระงับ'} | ระดับ: ${escapeHtml(user.role)}
+
                     </div>
 
                     <div class="flex items-center gap-2 mb-2">
+
                         <select id="role_${escapeAttr(user.line_user_id)}" class="flex-1 p-2 border rounded-lg bg-white">
+
                             <option value="super_admin" ${user.role === "super_admin" ? "selected" : ""}>super_admin</option>
+
                             <option value="admin" ${user.role === "admin" ? "selected" : ""}>admin</option>
+
                             <option value="teacher" ${user.role === "teacher" ? "selected" : ""}>teacher</option>
+
                             <option value="viewer" ${user.role === "viewer" ? "selected" : ""}>viewer</option>
+
                             <option value="inactive" ${user.role === "inactive" ? "selected" : ""}>inactive</option>
+
                         </select>
 
                         <button onclick="updateRole('${escapeJs(user.line_user_id)}')" class="bg-purple-600 text-white px-3 py-2 rounded-lg text-sm">
+
                             บันทึก
+
                         </button>
+
                     </div>
 
                     <div class="flex gap-2">
+
                         <button onclick="updateUserStatus('${escapeJs(user.line_user_id)}', true)" class="flex-1 bg-green-600 text-white px-3 py-2 rounded-lg text-sm">
+
                             เปิดใช้
+
                         </button>
 
                         <button onclick="updateUserStatus('${escapeJs(user.line_user_id)}', false)" class="flex-1 bg-red-600 text-white px-3 py-2 rounded-lg text-sm">
+
                             ระงับ
+
                         </button>
+
                     </div>
+
                 </div>
+
             `).join("");
 
         } catch (e) {
+
             box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+
         }
+
     }
 
     async function updateRole(targetLineUserId) {
+
         const role = document.getElementById(`role_${targetLineUserId}`).value;
 
         try {
+
             const res = await fetch("/api/admin/users/update-role", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     admin_line_user_id: USER_ID,
+
                     target_line_user_id: targetLineUserId,
+
                     role: role
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire("สำเร็จ", "อัปเดตสิทธิ์เรียบร้อยแล้ว", "success");
+
             loadUsers();
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     async function updateUserStatus(targetLineUserId, isActive) {
+
         try {
+
             const res = await fetch("/api/admin/users/update-status", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     admin_line_user_id: USER_ID,
+
                     target_line_user_id: targetLineUserId,
+
                     is_active: isActive
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire("สำเร็จ", "อัปเดตสถานะผู้ใช้เรียบร้อยแล้ว", "success");
+
             loadUsers();
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     async function loadPeriodReport(period, boxId) {
+
         if (!["super_admin", "admin", "viewer"].includes(CURRENT_ROLE)) {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับผู้มีสิทธิ์ดูรายงานเท่านั้น", "error");
+
         }
 
         const box = document.getElementById(boxId);
+
         box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลดรายงาน...</div>`;
 
         try {
+
             const res = await fetch(`/api/admin/report-period?admin_line_user_id=${encodeURIComponent(USER_ID)}&period=${encodeURIComponent(period)}`);
+
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             box.innerHTML = renderPeriodReport(data);
 
         } catch (e) {
+
             box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+
         }
+
     }
 
     async function sendPeriodReportToLine(period) {
+
         if (!["super_admin", "admin"].includes(CURRENT_ROLE)) {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เฉพาะแอดมินเท่านั้นที่ส่งรายงานเข้ากลุ่มได้", "error");
+
         }
 
         const result = await Swal.fire({
+
             title: "ยืนยันส่งรายงานเข้ากลุ่ม LINE?",
+
             text: "ระบบจะใช้โควตา Messaging API เฉพาะเมื่อกดปุ่มนี้เท่านั้น",
+
             icon: "question",
+
             showCancelButton: true,
+
             confirmButtonText: "ส่งรายงาน",
+
             cancelButtonText: "ยกเลิก",
+
             confirmButtonColor: "#16a34a"
+
         });
 
         if (!result.isConfirmed) {
+
             return;
+
         }
 
         try {
+
             const res = await fetch("/api/admin/send-period-report", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     admin_line_user_id: USER_ID,
+
                     period: period
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire("สำเร็จ", "ส่งรายงานเข้ากลุ่ม LINE แล้ว", "success");
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     function renderPeriodReport(data) {
+
         const s = data.summary || {};
 
         return `
+
             <div class="space-y-3">
+
                 <div class="bg-gray-50 border rounded-xl p-3">
+
                     <div class="font-bold text-gray-800">${escapeHtml(data.title || "-")}</div>
+
                     <div class="text-xs text-gray-500 break-all">
+
                         ${escapeHtml(data.start || "")} ถึง ${escapeHtml(data.end || "")}
+
                     </div>
+
                 </div>
 
                 <div class="grid grid-cols-2 gap-2">
+
                     <div class="bg-white border rounded-xl p-3 text-center">
+
                         <div class="text-2xl font-bold text-blue-600">${s.total_records || 0}</div>
+
                         <div class="text-xs text-gray-500">รายการทั้งหมด</div>
+
                     </div>
 
                     <div class="bg-white border rounded-xl p-3 text-center">
+
                         <div class="text-2xl font-bold text-red-600">${s.total_negative || 0}</div>
+
                         <div class="text-xs text-gray-500">คะแนนหักรวม</div>
+
                     </div>
 
                     <div class="bg-white border rounded-xl p-3 text-center">
+
                         <div class="text-2xl font-bold text-green-600">${s.total_positive || 0}</div>
+
                         <div class="text-xs text-gray-500">คะแนนบวกรวม</div>
+
                     </div>
 
                     <div class="bg-white border rounded-xl p-3 text-center">
+
                         <div class="text-2xl font-bold text-gray-700">${s.total_points || 0}</div>
+
                         <div class="text-xs text-gray-500">สุทธิ</div>
+
                     </div>
+
                 </div>
 
                 ${renderSummaryGroup("แยกตามพฤติกรรม", s.by_offense)}
+
                 ${renderSummaryGroup("แยกตามห้อง", s.by_room)}
+
                 ${renderSummaryGroup("นักเรียนที่มีรายการมากที่สุด", s.by_student)}
 
                 <div class="bg-white border rounded-xl p-3">
+
                     <div class="font-bold text-gray-700 mb-2">รายการล่าสุดในช่วงนี้</div>
+
                     ${(data.logs || []).length === 0 ? `
+
                         <div class="text-gray-400 text-sm">ไม่มีรายการ</div>
+
                     ` : (data.logs || []).map(log => `
+
                         <div class="border-b py-2">
+
                             <div class="font-bold text-gray-800">
+
                                 ${escapeHtml(log.student_name || log.student_id || "-")}
+
                                 <span class="text-xs text-gray-500">(${escapeHtml(log.room || "-")})</span>
+
                             </div>
+
                             <div class="${(log.points_deducted || 0) >= 0 ? 'text-green-600' : 'text-red-600'} text-sm">
-                                ${escapeHtml(log.offense_name || "-")} (${log.points_deducted || 0})
+
+                                ${escapeHtml(log.offense_name || "-")} (${(log.points_deducted || 0) >= 0 ? "+" : ""}${log.points_deducted || 0})
+
                             </div>
+
                             <div class="text-xs text-gray-500">
+
                                 ${escapeHtml(log.activity_type || "-")} | ${escapeHtml(log.created_at || "")}
+
                             </div>
+
                         </div>
+
                     `).join("")}
+
                 </div>
+
             </div>
+
         `;
+
     }
 
     function renderSummaryGroup(title, items) {
+
         if (!items || items.length === 0) {
+
             return `
+
                 <div class="bg-white border rounded-xl p-3">
+
                     <div class="font-bold text-gray-700 mb-2">${escapeHtml(title)}</div>
+
                     <div class="text-gray-400 text-sm">ไม่มีข้อมูล</div>
+
                 </div>
+
             `;
+
         }
 
         return `
+
             <div class="bg-white border rounded-xl p-3">
+
                 <div class="font-bold text-gray-700 mb-2">${escapeHtml(title)}</div>
+
                 ${items.slice(0, 10).map(item => `
+
                     <div class="flex justify-between border-b py-2 text-sm">
+
                         <div>
+
                             <div class="font-bold text-gray-800">${escapeHtml(item.name)}</div>
+
                             <div class="text-xs text-gray-500">${item.count} รายการ</div>
+
                         </div>
+
                         <div class="${item.points < 0 ? 'text-red-600' : 'text-green-600'} font-bold">
-                            ${item.points}
+
+                            ${item.points >= 0 ? "+" : ""}${item.points}
+
                         </div>
+
                     </div>
+
                 `).join("")}
+
             </div>
+
         `;
+
     }
 
     async function loadReportSummary() {
+
         if (!["super_admin", "admin"].includes(CURRENT_ROLE)) {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับแอดมินเท่านั้น", "error");
+
         }
 
         const box = document.getElementById("summary_list");
+
         box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลด...</div>`;
 
         try {
+
             const res = await fetch(`/api/admin/report-summary?admin_line_user_id=${encodeURIComponent(USER_ID)}`);
+
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             if (!data.logs || data.logs.length === 0) {
+
                 box.innerHTML = `<div class="text-gray-400 p-3">ยังไม่มีข้อมูล</div>`;
+
                 return;
+
             }
 
-            box.innerHTML = data.logs.map(log => `
-                <div class="bg-gray-50 border rounded-xl p-3">
-                    <div class="font-bold text-gray-800">
-                        ${escapeHtml(log.student_name || log.student_id || "-")}
-                        <span class="text-xs text-gray-500">(${escapeHtml(log.room || "-")})</span>
-                    </div>
-
-                    <div class="${(log.points_deducted || 0) >= 0 ? 'text-green-600' : 'text-red-600'} text-sm">
-                        ${escapeHtml(log.offense_name || "-")}
-                        <span>(${log.points_deducted})</span>
-                    </div>
-
-                    <div class="text-xs text-gray-500">
-                        กิจกรรม: ${escapeHtml(log.activity_type || "-")}
-                    </div>
-
-                    <div class="text-xs text-gray-400">
-                        ${escapeHtml(log.created_at || "")}
-                    </div>
-                </div>
-            `).join("");
+            box.innerHTML = data.logs.map(log => renderBehaviorLogCard(log)).join("");
 
         } catch (e) {
+
             box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+
         }
+
+    }
+
+    function renderBehaviorLogCard(log) {
+
+        return `
+
+            <div class="bg-gray-50 border rounded-xl p-3">
+
+                <div class="font-bold text-gray-800">
+
+                    ${escapeHtml(log.student_name || log.student_id || "-")}
+
+                    <span class="text-xs text-gray-500">(${escapeHtml(log.room || "-")})</span>
+
+                </div>
+
+                <div class="${(log.points_deducted || 0) >= 0 ? 'text-green-600' : 'text-red-600'} text-sm">
+
+                    ${escapeHtml(log.offense_name || "-")}
+
+                    <span>(${(log.points_deducted || 0) >= 0 ? "+" : ""}${log.points_deducted || 0})</span>
+
+                </div>
+
+                <div class="text-xs text-gray-500">
+
+                    กิจกรรม: ${escapeHtml(log.activity_type || "-")}
+
+                </div>
+
+                <div class="text-xs text-gray-500">
+
+                    หมายเหตุ: ${escapeHtml(log.reason || "-")}
+
+                </div>
+
+                <div class="text-xs text-gray-400 mb-3">
+
+                    ${escapeHtml(log.created_at || "")}
+
+                </div>
+
+                <div class="flex gap-2">
+
+                    <button onclick="editBehaviorLog('${escapeJs(log.id)}', '${escapeJs(log.activity_type || "")}', '${escapeJs(log.offense_name || "")}', ${parseInt(log.points_deducted || 0)}, '${escapeJs(log.reason || "")}')" class="flex-1 bg-yellow-500 text-white px-3 py-2 rounded-lg text-sm">
+
+                        แก้ไข
+
+                    </button>
+
+                    <button onclick="deleteBehaviorLog('${escapeJs(log.id)}')" class="flex-1 bg-red-600 text-white px-3 py-2 rounded-lg text-sm">
+
+                        ลบ
+
+                    </button>
+
+                </div>
+
+            </div>
+
+        `;
+
+    }
+
+    async function editBehaviorLog(logId, activityType, offenseName, points, reason) {
+
+        const absPoints = Math.abs(parseInt(points || 0));
+
+        const ruleOptions = offenseRules.map(rule => {
+
+            const selected = rule.rule_name === offenseName ? "selected" : "";
+
+            const behaviorType = rule.behavior_type || "negative";
+
+            const labelType = behaviorType === "positive" ? "เพิ่ม" : "หัก";
+
+            return `<option value="${escapeHtml(rule.rule_name)}" ${selected}>${escapeHtml(rule.rule_name)} (${labelType} ${rule.default_points})</option>`;
+
+        }).join("");
+
+        const result = await Swal.fire({
+
+            title: "แก้ไขรายการพฤติกรรม",
+
+            html: `
+
+                <label style="display:block;text-align:left;font-size:13px;">กิจกรรม</label>
+
+                <input id="edit_log_activity" class="swal2-input" value="${escapeHtml(activityType)}">
+
+                <label style="display:block;text-align:left;font-size:13px;">พฤติกรรม</label>
+
+                <select id="edit_log_offense" class="swal2-input">
+
+                    ${ruleOptions}
+
+                </select>
+
+                <label style="display:block;text-align:left;font-size:13px;">คะแนน</label>
+
+                <input id="edit_log_points" type="number" class="swal2-input" value="${absPoints}">
+
+                <label style="display:block;text-align:left;font-size:13px;">หมายเหตุ</label>
+
+                <input id="edit_log_reason" class="swal2-input" value="${escapeHtml(reason)}">
+
+            `,
+
+            showCancelButton: true,
+
+            confirmButtonText: "บันทึก",
+
+            cancelButtonText: "ยกเลิก",
+
+            confirmButtonColor: "#16a34a",
+
+            preConfirm: () => {
+
+                const newActivity = document.getElementById("edit_log_activity").value.trim();
+
+                const newOffense = document.getElementById("edit_log_offense").value;
+
+                const newPoints = parseInt(document.getElementById("edit_log_points").value);
+
+                const newReason = document.getElementById("edit_log_reason").value.trim();
+
+                if (!newActivity) {
+
+                    Swal.showValidationMessage("กรุณากรอกกิจกรรม");
+
+                    return false;
+
+                }
+
+                if (!newOffense) {
+
+                    Swal.showValidationMessage("กรุณาเลือกพฤติกรรม");
+
+                    return false;
+
+                }
+
+                if (isNaN(newPoints) || newPoints <= 0) {
+
+                    Swal.showValidationMessage("คะแนนต้องเป็นตัวเลขบวก");
+
+                    return false;
+
+                }
+
+                return {
+
+                    activity_type: newActivity,
+
+                    offense_name: newOffense,
+
+                    points_deducted: newPoints,
+
+                    reason: newReason
+
+                };
+
+            }
+
+        });
+
+        if (!result.isConfirmed) {
+
+            return;
+
+        }
+
+        try {
+
+            const res = await fetch("/api/admin/behavior-log/update", {
+
+                method: "POST",
+
+                headers: {
+
+                    "Content-Type": "application/json"
+
+                },
+
+                body: JSON.stringify({
+
+                    admin_line_user_id: USER_ID,
+
+                    log_id: logId,
+
+                    ...result.value
+
+                })
+
+            });
+
+            const data = await res.json();
+
+            if (data.status === "error") {
+
+                throw new Error(data.error);
+
+            }
+
+            Swal.fire("สำเร็จ", "แก้ไขรายการเรียบร้อยแล้ว", "success");
+
+            loadReportSummary();
+
+        } catch (e) {
+
+            Swal.fire("ข้อผิดพลาด", e.message, "error");
+
+        }
+
+    }
+
+    async function deleteBehaviorLog(logId) {
+
+        const result = await Swal.fire({
+
+            title: "ยืนยันลบรายการนี้?",
+
+            text: "รายการนี้จะถูกซ่อนจากรายงานและประวัติคะแนน แต่ยังตรวจสอบได้ใน Logs",
+
+            icon: "warning",
+
+            showCancelButton: true,
+
+            confirmButtonText: "ลบรายการ",
+
+            cancelButtonText: "ยกเลิก",
+
+            confirmButtonColor: "#dc2626"
+
+        });
+
+        if (!result.isConfirmed) {
+
+            return;
+
+        }
+
+        try {
+
+            const res = await fetch("/api/admin/behavior-log/delete", {
+
+                method: "POST",
+
+                headers: {
+
+                    "Content-Type": "application/json"
+
+                },
+
+                body: JSON.stringify({
+
+                    admin_line_user_id: USER_ID,
+
+                    log_id: logId
+
+                })
+
+            });
+
+            const data = await res.json();
+
+            if (data.status === "error") {
+
+                throw new Error(data.error);
+
+            }
+
+            Swal.fire("สำเร็จ", "ลบรายการเรียบร้อยแล้ว", "success");
+
+            loadReportSummary();
+
+        } catch (e) {
+
+            Swal.fire("ข้อผิดพลาด", e.message, "error");
+
+        }
+
     }
 
     function fillSystemSettingsForm() {
+
         if (!SYSTEM_SETTINGS) {
+
             return;
+
         }
 
         document.getElementById("setting_academic_year").value = SYSTEM_SETTINGS.academic_year || 2568;
+
         document.getElementById("setting_semester").value = SYSTEM_SETTINGS.semester || 1;
+
         document.getElementById("setting_base_score").value = SYSTEM_SETTINGS.base_score || 100;
+
         document.getElementById("setting_warning_threshold").value = SYSTEM_SETTINGS.warning_threshold || 80;
+
         document.getElementById("setting_risk_threshold").value = SYSTEM_SETTINGS.risk_threshold || 60;
+
         document.getElementById("setting_repeat_offense_threshold").value = SYSTEM_SETTINGS.repeat_offense_threshold || 3;
+
     }
 
     async function saveSystemSettings() {
+
         if (CURRENT_ROLE !== "super_admin") {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับ Super Admin เท่านั้น", "error");
+
         }
 
         const payload = {
+
             super_admin_line_user_id: USER_ID,
+
             academic_year: parseInt(document.getElementById("setting_academic_year").value),
+
             semester: parseInt(document.getElementById("setting_semester").value),
+
             base_score: parseInt(document.getElementById("setting_base_score").value),
+
             warning_threshold: parseInt(document.getElementById("setting_warning_threshold").value),
+
             risk_threshold: parseInt(document.getElementById("setting_risk_threshold").value),
+
             repeat_offense_threshold: parseInt(document.getElementById("setting_repeat_offense_threshold").value),
+
         };
 
         try {
+
             const res = await fetch("/api/super-admin/settings", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify(payload)
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             SYSTEM_SETTINGS = data.settings;
+
             Swal.fire("สำเร็จ", "บันทึกการตั้งค่าระบบเรียบร้อยแล้ว", "success");
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     async function loadOffenseRules() {
+
         if (CURRENT_ROLE !== "super_admin") {
+
             return;
+
         }
 
         const box = document.getElementById("rules_list");
+
         box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลด...</div>`;
 
         try {
+
             const res = await fetch(`/api/super-admin/offense-rules?super_admin_line_user_id=${encodeURIComponent(USER_ID)}`);
+
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             if (!data.rules || data.rules.length === 0) {
+
                 box.innerHTML = `<div class="text-gray-400 p-3">ยังไม่มีหมวดหมู่พฤติกรรม</div>`;
+
                 return;
+
             }
 
             box.innerHTML = data.rules.map(rule => {
+
                 const isPositive = rule.behavior_type === "positive";
+
                 const typeText = isPositive ? "ด้านบวก เพิ่มคะแนน" : "ด้านลบ หักคะแนน";
+
                 const typeClass = isPositive ? "text-green-600" : "text-red-600";
 
                 return `
+
                     <div class="bg-white border rounded-xl p-3">
+
                         <div class="font-bold text-gray-800">${escapeHtml(rule.rule_name)}</div>
+
                         <div class="text-xs ${typeClass} mb-1">${typeText}</div>
+
                         <div class="text-xs text-gray-500 mb-2">
+
                             คะแนนตั้งต้น: ${rule.default_points} |
+
                             ระบุเอง: ${rule.require_manual_score ? "ใช่" : "ไม่ใช่"} |
+
                             สถานะ: ${rule.is_active ? "เปิดใช้งาน" : "ปิดใช้งาน"}
+
                         </div>
 
                         <div class="flex gap-2">
+
                             <button onclick="editOffenseRule(${rule.id}, '${escapeJs(rule.rule_name)}', ${rule.default_points}, ${rule.require_manual_score}, '${rule.behavior_type}', ${rule.is_active})" class="flex-1 bg-yellow-500 text-white px-3 py-2 rounded-lg text-sm">
+
                                 แก้ไข
+
                             </button>
 
                             <button onclick="deleteOffenseRule(${rule.id})" class="flex-1 bg-red-600 text-white px-3 py-2 rounded-lg text-sm">
+
                                 ลบ
+
                             </button>
+
                         </div>
+
                     </div>
+
                 `;
+
             }).join("");
 
         } catch (e) {
+
             box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+
         }
+
     }
 
     async function addOffenseRule() {
+
         if (CURRENT_ROLE !== "super_admin") {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับ Super Admin เท่านั้น", "error");
+
         }
 
         const ruleName = document.getElementById("rule_name").value.trim();
+
         const behaviorType = document.getElementById("rule_behavior_type").value;
+
         const defaultPoints = parseInt(document.getElementById("rule_default_points").value);
+
         const requireManualScore = document.getElementById("rule_require_manual_score").checked;
+
         const isActive = document.getElementById("rule_is_active").checked;
 
         if (!ruleName) {
+
             return Swal.fire("แจ้งเตือน", "กรุณากรอกชื่อพฤติกรรม", "warning");
+
         }
 
         if (isNaN(defaultPoints) || defaultPoints <= 0) {
+
             return Swal.fire("แจ้งเตือน", "กรุณากรอกคะแนนตั้งต้นเป็นตัวเลขบวก", "warning");
+
         }
 
         try {
+
             const res = await fetch("/api/super-admin/offense-rules/add", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     super_admin_line_user_id: USER_ID,
+
                     rule_name: ruleName,
+
                     default_points: defaultPoints,
+
                     require_manual_score: requireManualScore,
+
                     behavior_type: behaviorType,
+
                     is_active: isActive
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             document.getElementById("rule_name").value = "";
+
             document.getElementById("rule_default_points").value = "";
+
             document.getElementById("rule_require_manual_score").checked = false;
+
             document.getElementById("rule_is_active").checked = true;
 
             Swal.fire("สำเร็จ", "เพิ่มหมวดหมู่พฤติกรรมเรียบร้อยแล้ว", "success");
 
             await loadOffenseRules();
+
             await loadInitData();
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     async function editOffenseRule(id, name, points, requireManual, behaviorType, isActive) {
+
         const result = await Swal.fire({
+
             title: "แก้ไขหมวดหมู่พฤติกรรม",
+
             html: `
+
                 <input id="edit_rule_name" class="swal2-input" placeholder="ชื่อพฤติกรรม" value="${escapeHtml(name)}">
+
                 <input id="edit_rule_points" type="number" class="swal2-input" placeholder="คะแนน" value="${points}">
+
                 <select id="edit_rule_behavior_type" class="swal2-input">
+
                     <option value="positive" ${behaviorType === "positive" ? "selected" : ""}>พฤติกรรมด้านบวก เพิ่มคะแนน</option>
+
                     <option value="negative" ${behaviorType === "negative" ? "selected" : ""}>พฤติกรรมด้านลบ หักคะแนน</option>
+
                 </select>
+
                 <label style="display:block;text-align:left;margin:8px 0;">
+
                     <input type="checkbox" id="edit_rule_manual" ${requireManual ? "checked" : ""}>
+
                     ให้ผู้ใช้ระบุคะแนนเอง
+
                 </label>
+
                 <label style="display:block;text-align:left;margin:8px 0;">
+
                     <input type="checkbox" id="edit_rule_active" ${isActive ? "checked" : ""}>
+
                     เปิดใช้งาน
+
                 </label>
+
             `,
+
             showCancelButton: true,
+
             confirmButtonText: "บันทึก",
+
             cancelButtonText: "ยกเลิก",
+
             confirmButtonColor: "#16a34a",
+
             preConfirm: () => {
+
                 const newName = document.getElementById("edit_rule_name").value.trim();
+
                 const newPoints = parseInt(document.getElementById("edit_rule_points").value);
+
                 const newBehaviorType = document.getElementById("edit_rule_behavior_type").value;
+
                 const newManual = document.getElementById("edit_rule_manual").checked;
+
                 const newActive = document.getElementById("edit_rule_active").checked;
 
                 if (!newName) {
+
                     Swal.showValidationMessage("กรุณากรอกชื่อพฤติกรรม");
+
                     return false;
+
                 }
 
                 if (isNaN(newPoints) || newPoints <= 0) {
+
                     Swal.showValidationMessage("คะแนนต้องเป็นตัวเลขบวก");
+
                     return false;
+
                 }
 
                 return {
+
                     rule_name: newName,
+
                     default_points: newPoints,
+
                     behavior_type: newBehaviorType,
+
                     require_manual_score: newManual,
+
                     is_active: newActive
+
                 };
+
             }
+
         });
 
         if (!result.isConfirmed) {
+
             return;
+
         }
 
         try {
+
             const payload = {
+
                 super_admin_line_user_id: USER_ID,
+
                 rule_id: id,
+
                 ...result.value
+
             };
 
             const res = await fetch("/api/super-admin/offense-rules/update", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify(payload)
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire("สำเร็จ", "แก้ไขหมวดหมู่พฤติกรรมเรียบร้อยแล้ว", "success");
 
             await loadOffenseRules();
+
             await loadInitData();
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     async function deleteOffenseRule(id) {
+
         const result = await Swal.fire({
+
             title: "ยืนยันลบหมวดหมู่?",
+
             text: "หากลบแล้ว ผู้ใช้จะเลือกหมวดหมู่นี้ไม่ได้อีก",
+
             icon: "warning",
+
             showCancelButton: true,
+
             confirmButtonText: "ลบ",
+
             cancelButtonText: "ยกเลิก",
+
             confirmButtonColor: "#dc2626"
+
         });
 
         if (!result.isConfirmed) {
+
             return;
+
         }
 
         try {
+
             const res = await fetch("/api/super-admin/offense-rules/delete", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     super_admin_line_user_id: USER_ID,
+
                     rule_id: id
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire("สำเร็จ", "ลบหมวดหมู่พฤติกรรมเรียบร้อยแล้ว", "success");
 
             await loadOffenseRules();
+
             await loadInitData();
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
+    }
+
+    async function loadAuditLogs() {
+
+        if (CURRENT_ROLE !== "super_admin") {
+
+            return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับ Super Admin เท่านั้น", "error");
+
+        }
+
+        const box = document.getElementById("audit_logs_box");
+
+        box.innerHTML = `<div class="text-gray-400 p-3">กำลังโหลด Logs...</div>`;
+
+        try {
+
+            const res = await fetch(`/api/super-admin/audit-logs?super_admin_line_user_id=${encodeURIComponent(USER_ID)}`);
+
+            const data = await res.json();
+
+            if (data.status === "error") {
+
+                throw new Error(data.error);
+
+            }
+
+            if (!data.logs || data.logs.length === 0) {
+
+                box.innerHTML = `<div class="text-gray-400 p-3">ยังไม่มี Logs</div>`;
+
+                return;
+
+            }
+
+            box.innerHTML = data.logs.map(log => `
+
+                <div class="bg-gray-50 border rounded-xl p-3">
+
+                    <div class="font-bold text-gray-800">
+
+                        ${escapeHtml(log.action || "-")}
+
+                    </div>
+
+                    <div class="text-xs text-gray-500 break-all">
+
+                        ผู้ดำเนินการ: ${escapeHtml(log.actor_line_user_id || "-")}
+
+                    </div>
+
+                    <div class="text-xs text-gray-500">
+
+                        ประเภท: ${escapeHtml(log.target_type || "-")} | เป้าหมาย: ${escapeHtml(log.target_id || "-")}
+
+                    </div>
+
+                    <div class="text-xs text-gray-400 mb-2">
+
+                        ${escapeHtml(log.created_at || "")}
+
+                    </div>
+
+                    <details class="text-xs bg-white border rounded-lg p-2">
+
+                        <summary class="cursor-pointer text-gray-700 font-bold">ดูรายละเอียด</summary>
+
+                        <pre class="whitespace-pre-wrap break-all mt-2">${escapeHtml(JSON.stringify(log.detail || {}, null, 2))}</pre>
+
+                    </details>
+
+                </div>
+
+            `).join("");
+
+        } catch (e) {
+
+            box.innerHTML = `<div class="text-red-500 p-3">${escapeHtml(e.message)}</div>`;
+
+        }
+
     }
 
     async function clearAllBehaviorLogs() {
+
         if (CURRENT_ROLE !== "super_admin") {
+
             return Swal.fire("ไม่ได้รับอนุญาต", "เมนูนี้สำหรับ Super Admin เท่านั้น", "error");
+
         }
 
         const firstConfirm = await Swal.fire({
+
             title: "ยืนยันการลบประวัติทั้งหมด?",
-            text: "ข้อมูลการแจ้งพฤติกรรมทั้งหมดจะถูกลบออกจากระบบ",
+
+            text: "ข้อมูลการแจ้งพฤติกรรมทั้งหมดจะถูกซ่อนออกจากรายงาน",
+
             icon: "warning",
+
             showCancelButton: true,
+
             confirmButtonText: "ดำเนินการต่อ",
+
             cancelButtonText: "ยกเลิก",
+
             confirmButtonColor: "#dc2626"
+
         });
 
         if (!firstConfirm.isConfirmed) {
+
             return;
+
         }
 
         const secondConfirm = await Swal.fire({
+
             title: "พิมพ์ DELETE_ALL เพื่อยืนยัน",
+
             input: "text",
+
             inputPlaceholder: "DELETE_ALL",
+
             icon: "warning",
+
             showCancelButton: true,
+
             confirmButtonText: "ยืนยันลบทั้งหมด",
+
             cancelButtonText: "ยกเลิก",
+
             confirmButtonColor: "#dc2626",
+
             preConfirm: (value) => {
+
                 if (value !== "DELETE_ALL") {
+
                     Swal.showValidationMessage("กรุณาพิมพ์ DELETE_ALL ให้ถูกต้อง");
+
                     return false;
+
                 }
+
                 return value;
+
             }
+
         });
 
         if (!secondConfirm.isConfirmed) {
+
             return;
+
         }
 
         try {
+
             Swal.fire({
+
                 title: "กำลังลบข้อมูล...",
+
                 allowOutsideClick: false,
+
                 didOpen: () => {
+
                     Swal.showLoading();
+
                 }
+
             });
 
             const res = await fetch("/api/super-admin/clear-behavior-logs", {
+
                 method: "POST",
+
                 headers: {
+
                     "Content-Type": "application/json"
+
                 },
+
                 body: JSON.stringify({
+
                     super_admin_line_user_id: USER_ID,
+
                     confirm_text: "DELETE_ALL"
+
                 })
+
             });
 
             const data = await res.json();
 
             if (data.status === "error") {
+
                 throw new Error(data.error);
+
             }
 
             Swal.fire("สำเร็จ", "ลบประวัติการแจ้งทั้งหมดเรียบร้อยแล้ว", "success");
 
         } catch (e) {
+
             Swal.fire("ข้อผิดพลาด", e.message, "error");
+
         }
+
     }
 
     function escapeHtml(value) {
+
         if (value === null || value === undefined) {
+
             return "";
+
         }
 
         return String(value)
+
             .replace(/&/g, "&amp;")
+
             .replace(/</g, "&lt;")
+
             .replace(/>/g, "&gt;")
+
             .replace(/"/g, "&quot;")
+
             .replace(/'/g, "&#039;");
+
     }
 
     function escapeAttr(value) {
+
         return escapeHtml(value);
+
     }
 
     function escapeJs(value) {
+
         if (value === null || value === undefined) {
+
             return "";
+
         }
 
         return String(value)
+
             .replace(/\\/g, "\\\\")
+
             .replace(/'/g, "\\'")
+
             .replace(/"/g, '\\"')
+
             .replace(/\n/g, " ")
+
             .replace(/\r/g, " ");
+
     }
 
     main();
+
 </script>
 
 </body>
+
 </html>
+
 '''
 
-
 @app.get("/liff")
+
 def get_liff_page():
+
     html = HTML_TEMPLATE.replace("__LIFF_ID__", LIFF_ID)
+
     return HTMLResponse(content=html, status_code=200)
 
-
 @app.get("/")
+
 def health_check():
+
     return {
+
         "status": "running",
+
         "service": "Harnthao Rangsi Prachasan - Student Affairs",
+
         "liff_id": LIFF_ID,
+
         "liff_url": LIFF_URL,
+
         "student_affairs_group_id": STUDENT_AFFAIRS_GROUP_ID,
+
         "auto_line_notify_on_behavior_submit": False,
+
         "line_report_sending_mode": "manual_only",
+
         "behavior_rule_mode": "positive_and_negative",
+
+        "behavior_log_edit_delete": True,
+
+        "student_score_lookup": True,
+
+        "audit_logs": True,
+
     }
