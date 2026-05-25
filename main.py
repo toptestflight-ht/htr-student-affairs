@@ -27,7 +27,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 STUDENT_AFFAIRS_GROUP_ID = os.environ.get("STUDENT_AFFAIRS_GROUP_ID") 
 
 # LIFF ID
-LIFF_ID = os.environ.get("LIFF_ID", "YOUR_LIFF_ID_HERE") 
+LIFF_ID = os.environ.get("2010184816-R1BNqd1n", "https://liff.line.me/2010184816-R1BNqd1n") 
 BANGKOK_TZ = pytz.timezone("Asia/Bangkok")
 
 if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
